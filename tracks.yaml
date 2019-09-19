@@ -22,5 +22,5 @@ tracks:
     release_tag: 888235e96edfa9ca49a5e074407a98ed72843e65
     ros_distro: dashing
     vcs_type: git
-    vcs_uri: https://github.com/atolab/rmw_cyclonedds.git
+    vcs_uri: https://github.com/ros2/rmw_cyclonedds.git
     version: 0.4.0
