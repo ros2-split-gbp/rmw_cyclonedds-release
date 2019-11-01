@@ -63,13 +63,10 @@
 
 /* True if the version of RMW is at least major.minor.patch */
 #define RMW_VERSION_GTE(major, minor, patch) ( \
-    (major < RMW_VERSION_MAJOR) ? true \
-    : (major > RMW_VERSION_MAJOR) ? false \
-    : (minor < RMW_VERSION_MINOR) ? true \
-    : (minor > RMW_VERSION_MINOR) ? false \
-    : (patch < RMW_VERSION_PATCH) ? true \
-    : (patch > RMW_VERSION_PATCH) ? false \
-    : true)
+    major < RMW_VERSION_MAJOR || ( \
+      major == RMW_VERSION_MAJOR && ( \
+        minor < RMW_VERSION_MINOR || ( \
+          minor == RMW_VERSION_MINOR && patch <= RMW_VERSION_PATCH))))
 
 /* Set to > 0 for printing warnings to stderr for each messages that was taken more than this many
    ms after writing */
@@ -1743,6 +1740,7 @@ extern "C" rmw_wait_set_t * rmw_create_wait_set(rmw_context_t * context, size_t 
   RET_ALLOC_X(wait_set->data, goto fail_alloc_wait_set_data);
   // This should default-construct the fields of CddsWaitset
   ws = static_cast<CddsWaitset *>(wait_set->data);
+  // cppcheck-suppress syntaxError
   RMW_TRY_PLACEMENT_NEW(ws, ws, goto fail_placement_new, CddsWaitset, );
   if (!ws) {
     RMW_SET_ERROR_MSG("failed to construct wait set info struct");
