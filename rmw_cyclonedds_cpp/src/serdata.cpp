@@ -11,23 +11,37 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#include <string.h>
+#include "serdata.hpp"
 
-#include <vector>
+#include <rmw/allocators.h>
+
+#include <cstring>
+#include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <utility>
 
+#include "Serialization.hpp"
+#include "TypeSupport2.hpp"
+#include "bytewise.hpp"
+#include "dds/ddsi/q_radmin.h"
 #include "rmw/error_handling.h"
-
 #include "rmw_cyclonedds_cpp/MessageTypeSupport.hpp"
 #include "rmw_cyclonedds_cpp/ServiceTypeSupport.hpp"
-
 #include "rmw_cyclonedds_cpp/serdes.hpp"
-#include "rmw_cyclonedds_cpp/serdata.hpp"
 
-#include "dds/ddsi/ddsi_iid.h"
-#include "dds/ddsi/q_radmin.h"
+/* Cyclone's nn_keyhash got renamed to ddsi_keyhash and shuffled around in the header
+   files to avoid pulling in tons of things just for a definition of a keyhash.  This
+   coincides with the introduction of DDS Security, which itself adds another function
+   that was missing.
+
+   If that additional function is not needed, it is known as nn_keyhash and only a forward
+   declaration is available; else it is known as ddsi_keyhash and a definition is
+   available */
+#if !DDSI_SERDATA_HAS_GET_KEYHASH
+#define ddsi_keyhash nn_keyhash
+#endif
 
 using MessageTypeSupport_c =
   rmw_cyclonedds_cpp::MessageTypeSupport<rosidl_typesupport_introspection_c__MessageMembers>;
@@ -109,23 +123,16 @@ void * create_response_type_support(
 
 static uint32_t serdata_rmw_size(const struct ddsi_serdata * dcmn)
 {
-  const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
-  return static_cast<uint32_t>(d->data.size());
+  size_t size = static_cast<const serdata_rmw *>(dcmn)->size();
+  uint32_t size_u32 = static_cast<uint32_t>(size);
+  assert(size == size_u32);
+  return size_u32;
 }
 
 static void serdata_rmw_free(struct ddsi_serdata * dcmn)
 {
-  const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
+  auto * d = static_cast<const serdata_rmw *>(dcmn);
   delete d;
-}
-
-static struct serdata_rmw * rmw_serdata_new(
-  const struct ddsi_sertopic * topic,
-  enum ddsi_serdata_kind kind)
-{
-  struct serdata_rmw * sd = new serdata_rmw;
-  ddsi_serdata_init(sd, topic, kind);
-  return sd;
 }
 
 static struct ddsi_serdata * serdata_rmw_from_ser(
@@ -133,32 +140,56 @@ static struct ddsi_serdata * serdata_rmw_from_ser(
   enum ddsi_serdata_kind kind,
   const struct nn_rdata * fragchain, size_t size)
 {
-  struct serdata_rmw * d = rmw_serdata_new(topic, kind);
+  auto d = std::make_unique<serdata_rmw>(topic, kind);
   uint32_t off = 0;
   assert(fragchain->min == 0);
   assert(fragchain->maxp1 >= off);    /* CDR header must be in first fragment */
-  d->data.reserve(size);
+  d->resize(size);
+
+  auto cursor = d->data();
   while (fragchain) {
     if (fragchain->maxp1 > off) {
       /* only copy if this fragment adds data */
       const unsigned char * payload =
         NN_RMSG_PAYLOADOFF(fragchain->rmsg, NN_RDATA_PAYLOAD_OFF(fragchain));
-      d->data.insert(
-        d->data.end(), payload + off - fragchain->min, payload + fragchain->maxp1 - fragchain->min);
+      auto src = payload + off - fragchain->min;
+      auto n_bytes = fragchain->maxp1 - off;
+      memcpy(cursor, src, n_bytes);
+      cursor = byte_offset(cursor, n_bytes);
       off = fragchain->maxp1;
+      assert(off <= size);
     }
     fragchain = fragchain->nextfrag;
   }
-  return d;
+  return d.release();
 }
+
+#if DDSI_SERDATA_HAS_FROM_SER_IOV
+static struct ddsi_serdata * serdata_rmw_from_ser_iov(
+  const struct ddsi_sertopic * topic,
+  enum ddsi_serdata_kind kind,
+  ddsrt_msg_iovlen_t niov, const ddsrt_iovec_t * iov,
+  size_t size)
+{
+  auto d = std::make_unique<serdata_rmw>(topic, kind);
+  d->resize(size);
+
+  auto cursor = d->data();
+  for (ddsrt_msg_iovlen_t i = 0; i < niov; i++) {
+    memcpy(cursor, iov[i].iov_base, iov[i].iov_len);
+    cursor = byte_offset(cursor, iov[i].iov_len);
+  }
+  return d.release();
+}
+#endif
 
 static struct ddsi_serdata * serdata_rmw_from_keyhash(
   const struct ddsi_sertopic * topic,
-  const struct nn_keyhash * keyhash)
+  const struct ddsi_keyhash * keyhash)
 {
   static_cast<void>(keyhash);    // unused
   /* there is no key field, so from_keyhash is trivial */
-  return rmw_serdata_new(topic, SDK_KEY);
+  return new serdata_rmw(topic, SDK_KEY);
 }
 
 static struct ddsi_serdata * serdata_rmw_from_sample(
@@ -168,47 +199,24 @@ static struct ddsi_serdata * serdata_rmw_from_sample(
 {
   try {
     const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(topiccmn);
-    struct serdata_rmw * d = rmw_serdata_new(topic, kind);
+    auto d = std::make_unique<serdata_rmw>(topic, kind);
     if (kind != SDK_DATA) {
       /* ROS2 doesn't do keys, so SDK_KEY is trivial */
     } else if (!topic->is_request_header) {
-      cycser sd(d->data);
-      if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
-        auto typed_typesupport =
-          static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
-        (void) typed_typesupport->serializeROSmessage(sample, sd);
-      } else if (using_introspection_cpp_typesupport(topic->type_support.typesupport_identifier_)) {
-        auto typed_typesupport =
-          static_cast<MessageTypeSupport_cpp *>(topic->type_support.type_support_);
-        (void) typed_typesupport->serializeROSmessage(sample, sd);
-      }
+      size_t sz = topic->cdr_writer->get_serialized_size(sample);
+      d->resize(sz);
+      topic->cdr_writer->serialize(d->data(), sample);
     } else {
-      /* The "prefix" lambda is there to inject the service invocation header data into the CDR
-        stream -- I haven't checked how it is done in the official RMW implementations, so it is
-        probably incompatible. */
-      const cdds_request_wrapper_t * wrap = static_cast<const cdds_request_wrapper_t *>(sample);
-      auto prefix = [wrap](cycser & ser) {ser << wrap->header.guid; ser << wrap->header.seq;};
-      cycser sd(d->data);
-      if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
-        auto typed_typesupport =
-          static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
-        (void) typed_typesupport->serializeROSmessage(wrap->data, sd, prefix);
-      } else if (using_introspection_cpp_typesupport(topic->type_support.typesupport_identifier_)) {
-        auto typed_typesupport =
-          static_cast<MessageTypeSupport_cpp *>(topic->type_support.type_support_);
-        (void) typed_typesupport->serializeROSmessage(wrap->data, sd, prefix);
-      }
+      /* inject the service invocation header data into the CDR stream --
+       * I haven't checked how it is done in the official RMW implementations, so it is
+       * probably incompatible. */
+      auto wrap = *static_cast<const cdds_request_wrapper_t *>(sample);
+      size_t sz = topic->cdr_writer->get_serialized_size(wrap);
+      d->resize(sz);
+      topic->cdr_writer->serialize(d->data(), wrap);
     }
-    /* FIXME: CDR padding in DDSI makes me do this to avoid reading beyond the bounds of the vector
-      when copying data to network.  Should fix Cyclone to handle that more elegantly.  */
-    while (d->data.size() % 4) {
-      d->data.push_back(0);
-    }
-    return d;
-  } catch (rmw_cyclonedds_cpp::Exception & e) {
-    RMW_SET_ERROR_MSG(e.what());
-    return nullptr;
-  } catch (std::runtime_error & e) {
+    return d.release();
+  } catch (std::exception & e) {
     RMW_SET_ERROR_MSG(e.what());
     return nullptr;
   }
@@ -219,37 +227,32 @@ struct ddsi_serdata * serdata_rmw_from_serialized_message(
   const void * raw, size_t size)
 {
   const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(topiccmn);
-  struct serdata_rmw * d = rmw_serdata_new(topic, SDK_DATA);
-  /* FIXME: CDR padding in DDSI makes me do this to avoid reading beyond the bounds of the vector
-     when copying data to network.  Should fix Cyclone to handle that more elegantly. */
-  d->data.resize(size);
-  memcpy(d->data.data(), raw, size);
-  while (d->data.size() % 4) {
-    d->data.push_back(0);
-  }
+  auto d = new serdata_rmw(topic, SDK_DATA);
+  d->resize(size);
+  memcpy(d->data(), raw, size);
   return d;
 }
 
 static struct ddsi_serdata * serdata_rmw_to_topicless(const struct ddsi_serdata * dcmn)
 {
-  const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
-  struct serdata_rmw * d1 = rmw_serdata_new(d->topic, SDK_KEY);
+  auto d = static_cast<const serdata_rmw *>(dcmn);
+  auto d1 = new serdata_rmw(d->topic, SDK_KEY);
   d1->topic = nullptr;
   return d1;
 }
 
 static void serdata_rmw_to_ser(const struct ddsi_serdata * dcmn, size_t off, size_t sz, void * buf)
 {
-  const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
-  memcpy(buf, reinterpret_cast<const char *>(d->data.data()) + off, sz);
+  auto d = static_cast<const serdata_rmw *>(dcmn);
+  memcpy(buf, byte_offset(d->data(), off), sz);
 }
 
 static struct ddsi_serdata * serdata_rmw_to_ser_ref(
   const struct ddsi_serdata * dcmn, size_t off,
   size_t sz, ddsrt_iovec_t * ref)
 {
-  const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
-  ref->iov_base = const_cast<char *>(reinterpret_cast<const char *>(d->data.data())) + off;
+  auto d = static_cast<const serdata_rmw *>(dcmn);
+  ref->iov_base = byte_offset(d->data(), off);
   ref->iov_len = (ddsrt_iov_len_t) sz;
   return ddsi_serdata_ref(d);
 }
@@ -257,8 +260,7 @@ static struct ddsi_serdata * serdata_rmw_to_ser_ref(
 static void serdata_rmw_to_ser_unref(struct ddsi_serdata * dcmn, const ddsrt_iovec_t * ref)
 {
   static_cast<void>(ref);    // unused
-  struct serdata_rmw * d = static_cast<struct serdata_rmw *>(dcmn);
-  ddsi_serdata_unref(d);
+  ddsi_serdata_unref(static_cast<serdata_rmw *>(dcmn));
 }
 
 static bool serdata_rmw_to_sample(
@@ -268,14 +270,14 @@ static bool serdata_rmw_to_sample(
   try {
     static_cast<void>(bufptr);    // unused
     static_cast<void>(buflim);    // unused
-    const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
+    auto d = static_cast<const serdata_rmw *>(dcmn);
     const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(d->topic);
     assert(bufptr == NULL);
     assert(buflim == NULL);
     if (d->kind != SDK_DATA) {
       /* ROS2 doesn't do keys in a meaningful way yet */
     } else if (!topic->is_request_header) {
-      cycdeser sd(static_cast<const void *>(d->data.data()), d->data.size());
+      cycdeser sd(d->data(), d->size());
       if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
         auto typed_typesupport =
           static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
@@ -291,7 +293,7 @@ static bool serdata_rmw_to_sample(
         probably incompatible. */
       cdds_request_wrapper_t * const wrap = static_cast<cdds_request_wrapper_t *>(sample);
       auto prefix = [wrap](cycdeser & ser) {ser >> wrap->header.guid; ser >> wrap->header.seq;};
-      cycdeser sd(static_cast<const void *>(d->data.data()), d->data.size());
+      cycdeser sd(d->data(), d->size());
       if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
         auto typed_typesupport =
           static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
@@ -340,13 +342,13 @@ static size_t serdata_rmw_print(
   const struct ddsi_sertopic * tpcmn, const struct ddsi_serdata * dcmn, char * buf, size_t bufsize)
 {
   try {
-    const struct serdata_rmw * d = static_cast<const struct serdata_rmw *>(dcmn);
+    auto d = static_cast<const serdata_rmw *>(dcmn);
     const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(tpcmn);
     if (d->kind != SDK_DATA) {
       /* ROS2 doesn't do keys in a meaningful way yet */
       return static_cast<size_t>(snprintf(buf, bufsize, ":k:{}"));
     } else if (!topic->is_request_header) {
-      cycprint sd(buf, bufsize, static_cast<const void *>(d->data.data()), d->data.size());
+      cycprint sd(buf, bufsize, d->data(), d->size());
       if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
         auto typed_typesupport =
           static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
@@ -364,7 +366,7 @@ static size_t serdata_rmw_print(
       auto prefix = [&wrap](cycprint & ser) {
           ser >> wrap.header.guid; ser.print_constant(","); ser >> wrap.header.seq;
         };
-      cycprint sd(buf, bufsize, static_cast<const void *>(d->data.data()), d->data.size());
+      cycprint sd(buf, bufsize, d->data(), d->size());
       if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
         auto typed_typesupport =
           static_cast<MessageTypeSupport_c *>(topic->type_support.type_support_);
@@ -387,10 +389,26 @@ static size_t serdata_rmw_print(
 }
 #endif
 
+#if DDSI_SERDATA_HAS_GET_KEYHASH
+static void serdata_rmw_get_keyhash(
+  const struct ddsi_serdata * d, struct ddsi_keyhash * buf,
+  bool force_md5)
+{
+  /* ROS2 doesn't do keys in a meaningful way yet, this is never called for topics without
+     key fields */
+  static_cast<void>(d);
+  static_cast<void>(force_md5);
+  memset(buf, 0, sizeof(*buf));
+}
+#endif
+
 static const struct ddsi_serdata_ops serdata_rmw_ops = {
   serdata_rmw_eqkey,
   serdata_rmw_size,
   serdata_rmw_from_ser,
+#if DDSI_SERDATA_HAS_FROM_SER_IOV
+  serdata_rmw_from_ser_iov,
+#endif
   serdata_rmw_from_keyhash,
   serdata_rmw_from_sample,
   serdata_rmw_to_ser,
@@ -402,6 +420,9 @@ static const struct ddsi_serdata_ops serdata_rmw_ops = {
   serdata_rmw_free
 #if DDSI_SERDATA_HAS_PRINT
   , serdata_rmw_print
+#endif
+#if DDSI_SERDATA_HAS_GET_KEYHASH
+  , serdata_rmw_get_keyhash
 #endif
 };
 
@@ -449,11 +470,46 @@ static void sertopic_rmw_free_samples(
   (void) op;
 }
 
+#if DDSI_SERTOPIC_HAS_EQUAL_AND_HASH
+bool sertopic_rmw_equal(
+  const struct ddsi_sertopic * acmn, const struct ddsi_sertopic * bcmn)
+{
+  /* A bit of a guess: topics with the same name & type name are really the same if they have
+     the same type support identifier as well */
+  const struct sertopic_rmw * a = static_cast<const struct sertopic_rmw *>(acmn);
+  const struct sertopic_rmw * b = static_cast<const struct sertopic_rmw *>(bcmn);
+  if (a->is_request_header != b->is_request_header) {
+    return false;
+  }
+  if (strcmp(
+      a->type_support.typesupport_identifier_,
+      b->type_support.typesupport_identifier_) != 0)
+  {
+    return false;
+  }
+  return true;
+}
+
+uint32_t sertopic_rmw_hash(const struct ddsi_sertopic * tpcmn)
+{
+  const struct sertopic_rmw * tp = static_cast<const struct sertopic_rmw *>(tpcmn);
+  uint32_t h2 = static_cast<uint32_t>(std::hash<bool>{} (tp->is_request_header));
+  uint32_t h1 =
+    static_cast<uint32_t>(std::hash<std::string>{} (std::string(
+      tp->type_support.typesupport_identifier_)));
+  return h1 ^ h2;
+}
+#endif
+
 static const struct ddsi_sertopic_ops sertopic_rmw_ops = {
   sertopic_rmw_free,
   sertopic_rmw_zero_samples,
   sertopic_rmw_realloc_samples,
   sertopic_rmw_free_samples
+#if DDSI_SERTOPIC_HAS_EQUAL_AND_HASH
+  , sertopic_rmw_equal,
+  sertopic_rmw_hash
+#endif
 };
 
 template<typename MembersType>
@@ -493,12 +549,14 @@ static std::string get_type_name(const char * type_support_identifier, void * ty
 
 struct sertopic_rmw * create_sertopic(
   const char * topicname, const char * type_support_identifier,
-  void * type_support, bool is_request_header)
+  void * type_support, bool is_request_header,
+  std::unique_ptr<rmw_cyclonedds_cpp::StructValueType> message_type)
 {
   struct sertopic_rmw * st = new struct sertopic_rmw;
 #if DDSI_SERTOPIC_HAS_TOPICKIND_NO_KEY
   std::string type_name = get_type_name(type_support_identifier, type_support);
-  ddsi_sertopic_init(static_cast<struct ddsi_sertopic *>(st), topicname,
+  ddsi_sertopic_init(
+    static_cast<struct ddsi_sertopic *>(st), topicname,
     type_name.c_str(), &sertopic_rmw_ops, &serdata_rmw_ops, true);
 #else
   memset(st, 0, sizeof(struct ddsi_sertopic));
@@ -517,5 +575,30 @@ struct sertopic_rmw * create_sertopic(
   st->type_support.typesupport_identifier_ = type_support_identifier;
   st->type_support.type_support_ = type_support;
   st->is_request_header = is_request_header;
+  st->cdr_writer = rmw_cyclonedds_cpp::make_cdr_writer(std::move(message_type));
   return st;
+}
+
+void serdata_rmw::resize(size_t requested_size)
+{
+  if (!requested_size) {
+    m_size = 0;
+    m_data.reset();
+    return;
+  }
+
+  /* FIXME: CDR padding in DDSI makes me do this to avoid reading beyond the bounds
+  when copying data to network.  Should fix Cyclone to handle that more elegantly.  */
+  size_t n_pad_bytes = (0 - requested_size) % 4;
+  m_data.reset(new byte[requested_size + n_pad_bytes]);
+  m_size = requested_size + n_pad_bytes;
+
+  // zero the very end. The caller isn't necessarily going to overwrite it.
+  std::memset(byte_offset(m_data.get(), requested_size), '\0', n_pad_bytes);
+}
+
+serdata_rmw::serdata_rmw(const ddsi_sertopic * topic, ddsi_serdata_kind kind)
+: ddsi_serdata{}
+{
+  ddsi_serdata_init(this, topic, kind);
 }
