@@ -1,4 +1,4 @@
-// Copyright 2019 ADLINK Technology Limited.
+// Copyright 2019 ADLINK Technology
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,12 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#ifndef RMW_CYCLONEDDS_CPP__RMW_VERSION_TEST_HPP_
+#define RMW_CYCLONEDDS_CPP__RMW_VERSION_TEST_HPP_
 
-#ifndef NAMESPACE_PREFIX_HPP_
-#define NAMESPACE_PREFIX_HPP_
+/* True if the version of RMW is at least major.minor.patch */
+#define RMW_VERSION_GTE(major, minor, patch) ( \
+    major < RMW_VERSION_MAJOR || ( \
+      major == RMW_VERSION_MAJOR && ( \
+        minor < RMW_VERSION_MINOR || ( \
+          minor == RMW_VERSION_MINOR && patch <= RMW_VERSION_PATCH))))
 
-static const char ROS_TOPIC_PREFIX[] = "rt";
-static const char ROS_SERVICE_REQUESTER_PREFIX[] = "rq";
-static const char ROS_SERVICE_RESPONSE_PREFIX[] = "rr";
-
-#endif  // NAMESPACE_PREFIX_HPP_
+#endif  // RMW_CYCLONEDDS_CPP__RMW_VERSION_TEST_HPP_
