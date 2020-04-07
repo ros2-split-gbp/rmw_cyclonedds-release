@@ -16,8 +16,6 @@ cmake_minimum_required(VERSION 3.5)
 
 project(rmw_cyclonedds_cpp)
 
-link_directories(/usr/local/lib)
-
 # Default to C++14
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14)
@@ -50,12 +48,7 @@ ament_export_dependencies(rosidl_generator_c)
 ament_export_dependencies(rosidl_typesupport_introspection_c)
 ament_export_dependencies(rosidl_typesupport_introspection_cpp)
 
-include_directories(include)
-
-###??
-
 add_library(rmw_cyclonedds_cpp
-  src/namespace_prefix.cpp
   src/rmw_node.cpp
   src/serdata.cpp
   src/serdes.cpp
@@ -63,6 +56,12 @@ add_library(rmw_cyclonedds_cpp
   src/u16string.cpp
   src/exception.cpp
   src/deserialization_exception.cpp
+  src/Serialization.cpp
+  src/TypeSupport2.cpp)
+
+target_include_directories(rmw_cyclonedds_cpp PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(rmw_cyclonedds_cpp CycloneDDS::ddsc)
@@ -101,9 +100,7 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-ament_package(
-  CONFIG_EXTRAS "rmw_cyclonedds_cpp-extras.cmake"
-)
+ament_package()
 
 install(
   DIRECTORY include/
