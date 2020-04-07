@@ -1,3 +1,28 @@
+## rmw_cyclonedds (dashing) - 0.5.1-1
+
+The packages in the `rmw_cyclonedds` repository were released into the `dashing` distro by running `/usr/local/bin/bloom-release --track dashing --ros-distro dashing rmw_cyclonedds --edit` on `Tue, 07 Apr 2020 08:11:43 -0000`
+
+These packages were released:
+- `cyclonedds_cmake_module`
+- `rmw_cyclonedds_cpp`
+
+Version of package(s) in repository `rmw_cyclonedds`:
+
+- upstream repository: https://github.com/ros2/rmw_cyclonedds.git
+- release repository: https://github.com/ros2-gbp/rmw_cyclonedds-release.git
+- rosdistro version: `0.4.2-1`
+- old version: `0.4.2-1`
+- new version: `0.5.1-1`
+
+Versions of tools used:
+
+- bloom version: `0.9.3`
+- catkin_pkg version: `0.4.16`
+- rosdep version: `0.19.0`
+- rosdistro version: `0.8.0`
+- vcstools version: `0.1.42`
+
+
 ## rmw_cyclonedds (eloquent) - 0.5.1-1
 
 The packages in the `rmw_cyclonedds` repository were released into the `eloquent` distro by running `/usr/local/bin/bloom-release --track eloquent --ros-distro eloquent rmw_cyclonedds --edit` on `Fri, 13 Mar 2020 09:40:35 -0000`
