@@ -1,1 +1,1 @@
-{"trim": "", "base": "800a802", "trimbase": "", "parent": "debian/foxy/rmw_cyclonedds_cpp", "previous": "c2c3fff"}
+{"base": "92bb4f4", "parent": "debian/foxy/rmw_cyclonedds_cpp", "previous": "531da63", "trim": "", "trimbase": ""}
