@@ -18,11 +18,11 @@ tracks:
     patches: null
     release_inc: '1'
     release_repo_url: https://github.com/ros2-gbp/rmw_cyclonedds-release.git
-    release_tag: 0.5.1
+    release_tag: :{version}
     ros_distro: dashing
     vcs_type: git
     vcs_uri: https://github.com/ros2/rmw_cyclonedds.git
-    version: 0.5.1
+    version: :{auto}
   eloquent:
     actions:
     - bloom-export-upstream :{vcs_local_uri} :{vcs_type} --tag :{release_tag} --display-uri
@@ -42,11 +42,11 @@ tracks:
     patches: null
     release_inc: '1'
     release_repo_url: https://github.com/ros2-gbp/rmw_cyclonedds-release.git
-    release_tag: 0.5.1
+    release_tag: :{version}
     ros_distro: eloquent
     vcs_type: git
     vcs_uri: https://github.com/ros2/rmw_cyclonedds.git
-    version: 0.5.1
+    version: :{auto}
   foxy:
     actions:
     - bloom-export-upstream :{vcs_local_uri} :{vcs_type} --tag :{release_tag} --display-uri
