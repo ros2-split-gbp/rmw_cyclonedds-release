@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cassert>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,6 +52,7 @@
 
 #include "fallthrough_macro.hpp"
 #include "Serialization.hpp"
+#include "rcpputils/scope_exit.hpp"
 #include "rmw/impl/cpp/macros.hpp"
 #include "rmw/impl/cpp/key_value.hpp"
 
@@ -263,6 +266,9 @@ struct rmw_context_impl_t
   size_t node_count{0};
   std::mutex initialization_mutex;
 
+  /* Shutdown flag */
+  bool is_shutdown{false};
+
   /* suffix for GUIDs to construct unique client/service ids
      (protected by initialization_mutex) */
   uint32_t client_service_id;
@@ -445,6 +451,10 @@ extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_i
 {
   RMW_CHECK_ARGUMENT_FOR_NULL(src, RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_ARGUMENT_FOR_NULL(dst, RMW_RET_INVALID_ARGUMENT);
+  if (NULL == src->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected initialized dst");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     src,
     src->implementation_identifier,
@@ -454,40 +464,43 @@ extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_i
     RMW_SET_ERROR_MSG("expected zero-initialized dst");
     return RMW_RET_INVALID_ARGUMENT;
   }
-
   const rcutils_allocator_t * allocator = &src->allocator;
-  rmw_ret_t ret = RMW_RET_OK;
 
-  allocator->deallocate(dst->enclave, allocator->state);
-  *dst = *src;
-  dst->enclave = NULL;
-  dst->security_options = rmw_get_zero_initialized_security_options();
-
-  dst->enclave = rcutils_strdup(src->enclave, *allocator);
-  if (src->enclave && !dst->enclave) {
-    ret = RMW_RET_BAD_ALLOC;
-    goto fail;
+  rmw_init_options_t tmp = *src;
+  tmp.enclave = rcutils_strdup(tmp.enclave, *allocator);
+  if (NULL != src->enclave && NULL == tmp.enclave) {
+    return RMW_RET_BAD_ALLOC;
   }
-  return rmw_security_options_copy(&src->security_options, allocator, &dst->security_options);
-fail:
-  allocator->deallocate(dst->enclave, allocator->state);
-  return ret;
+  tmp.security_options = rmw_get_zero_initialized_security_options();
+  rmw_ret_t ret =
+    rmw_security_options_copy(&src->security_options, allocator, &tmp.security_options);
+  if (RMW_RET_OK != ret) {
+    allocator->deallocate(tmp.enclave, allocator->state);
+    return ret;
+  }
+  *dst = tmp;
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_init_options_fini(rmw_init_options_t * init_options)
 {
   RMW_CHECK_ARGUMENT_FOR_NULL(init_options, RMW_RET_INVALID_ARGUMENT);
-  rcutils_allocator_t & allocator = init_options->allocator;
-  RCUTILS_CHECK_ALLOCATOR(&allocator, return RMW_RET_INVALID_ARGUMENT);
+  if (NULL == init_options->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected initialized init_options");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     init_options,
     init_options->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-  allocator.deallocate(init_options->enclave, allocator.state);
-  rmw_security_options_fini(&init_options->security_options, &allocator);
+  rcutils_allocator_t * allocator = &init_options->allocator;
+  RCUTILS_CHECK_ALLOCATOR(allocator, return RMW_RET_INVALID_ARGUMENT);
+
+  allocator->deallocate(init_options->enclave, allocator->state);
+  rmw_ret_t ret = rmw_security_options_fini(&init_options->security_options, allocator);
   *init_options = rmw_get_zero_initialized_init_options();
-  return RMW_RET_OK;
+  return ret;
 }
 
 static void convert_guid_to_gid(const dds_guid_t & guid, rmw_gid_t & gid)
@@ -1107,15 +1120,21 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
 {
   rmw_ret_t ret;
 
-  static_cast<void>(options);
-  static_cast<void>(context);
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(options, RMW_RET_INVALID_ARGUMENT);
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    options->implementation_identifier,
+    "expected initialized init options",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     options,
     options->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  if (NULL != context->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected a zero-initialized context");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
 
   if (options->domain_id >= UINT32_MAX && options->domain_id != RMW_DEFAULT_DOMAIN_ID) {
     RCUTILS_LOG_ERROR_NAMED(
@@ -1123,47 +1142,67 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
     return RMW_RET_INVALID_ARGUMENT;
   }
 
+  const rmw_context_t zero_context = rmw_get_zero_initialized_context();
+  assert(0 == std::memcmp(context, &zero_context, sizeof(rmw_context_t)));
+  auto restore_context = rcpputils::make_scope_exit(
+    [context, &zero_context]() {*context = zero_context;});
+
   context->instance_id = options->instance_id;
   context->implementation_identifier = eclipse_cyclonedds_identifier;
-  context->impl = nullptr;
+
+  context->impl = new (std::nothrow) rmw_context_impl_t();
+  if (nullptr == context->impl) {
+    RMW_SET_ERROR_MSG("failed to allocate context impl");
+    return RMW_RET_BAD_ALLOC;
+  }
+  auto cleanup_impl = rcpputils::make_scope_exit(
+    [context]() {delete context->impl;});
 
   if ((ret = rmw_init_options_copy(options, &context->options)) != RMW_RET_OK) {
     return ret;
   }
 
-  rmw_context_impl_t * impl = new(std::nothrow) rmw_context_impl_t();
-  if (nullptr == impl) {
-    return RMW_RET_BAD_ALLOC;
-  }
-
-  context->impl = impl;
+  cleanup_impl.cancel();
+  restore_context.cancel();
   return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_shutdown(rmw_context_t * context)
 {
-  RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    context->impl,
+    "expected initialized context",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     context,
     context->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-  // Nothing to do here for now.
-  // This is just the middleware's notification that shutdown was called.
+  context->impl->is_shutdown = true;
   return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_context_fini(rmw_context_t * context)
 {
-  RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    context->impl,
+    "expected initialized context",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     context,
     context->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  if (!context->impl->is_shutdown) {
+    RMW_SET_ERROR_MSG("context has not been shutdown");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  rmw_ret_t ret = rmw_init_options_fini(&context->options);
   delete context->impl;
   *context = rmw_get_zero_initialized_context();
-  return RMW_RET_OK;
+  return ret;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
