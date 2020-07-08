@@ -1131,6 +1131,10 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
     options->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    options->enclave,
+    "expected non-null enclave",
+    return RMW_RET_INVALID_ARGUMENT);
   if (NULL != context->implementation_identifier) {
     RMW_SET_ERROR_MSG("expected a zero-initialized context");
     return RMW_RET_INVALID_ARGUMENT;
@@ -1212,12 +1216,8 @@ extern "C" rmw_ret_t rmw_context_fini(rmw_context_t * context)
 /////////////////////////////////////////////////////////////////////////////////////////
 
 extern "C" rmw_node_t * rmw_create_node(
-  rmw_context_t * context, const char * name,
-  const char * namespace_, size_t domain_id,
-  bool localhost_only)
+  rmw_context_t * context, const char * name, const char * namespace_)
 {
-  static_cast<void>(domain_id);
-  static_cast<void>(localhost_only);
   RET_NULL_X(name, return nullptr);
   RET_NULL_X(namespace_, return nullptr);
   rmw_ret_t ret;
