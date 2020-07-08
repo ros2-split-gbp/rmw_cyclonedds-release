@@ -2,23 +2,10 @@
 Changelog for package rmw_cyclonedds_cpp
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-0.9.0 (2020-06-29)
+0.7.2 (2020-07-07)
 ------------------
-* Ensure compliant init/shutdown API implementations. (`#202 <https://github.com/ros2/rmw_cyclonedds/issues/202>`_)
-* Ensure compliant init options API implementations. (`#200 <https://github.com/ros2/rmw_cyclonedds/issues/200>`_)
-* Finalize context iff shutdown. (`#196 <https://github.com/ros2/rmw_cyclonedds/issues/196>`_)
+* Handle RMW_DEFAULT_DOMAIN_ID (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_) (`#199 <https://github.com/ros2/rmw_cyclonedds/issues/199>`_)
 * Contributors: Michel Hidalgo
-
-0.8.1 (2020-06-22)
-------------------
-* Handle RMW_DEFAULT_DOMAIN_ID. (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_)
-* Contributors: Michel Hidalgo
-
-0.8.0 (2020-06-18)
-------------------
-* Add support to message lost event (`#192 <https://github.com/ros2/rmw_cyclonedds/issues/192>`_)
-* Mitigate lost service responses discovery issue (`#187 <https://github.com/ros2/rmw_cyclonedds/issues/187>`_)
-* Contributors: Ivan Santiago Paunovic, eboasson
 
 0.7.1 (2020-06-02)
 ------------------
