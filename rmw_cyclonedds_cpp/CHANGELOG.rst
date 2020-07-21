@@ -2,34 +2,15 @@
 Changelog for package rmw_cyclonedds_cpp
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-0.11.0 (2020-07-20)
--------------------
-* Ensure compliant node construction/destruction API (`#206 <https://github.com/ros2/rmw_cyclonedds/issues/206>`_)
-* Contributors: Michel Hidalgo
-
-0.10.0 (2020-07-08)
--------------------
-* Remove domain_id and localhost_only from node API (`#205 <https://github.com/ros2/rmw_cyclonedds/issues/205>`_)
-* Amend rmw_init() implementation: require enclave. (`#204 <https://github.com/ros2/rmw_cyclonedds/issues/204>`_)
-* Contributors: Ivan Santiago Paunovic, Michel Hidalgo
-
-0.9.0 (2020-06-29)
+0.7.3 (2020-07-21)
 ------------------
-* Ensure compliant init/shutdown API implementations. (`#202 <https://github.com/ros2/rmw_cyclonedds/issues/202>`_)
-* Ensure compliant init options API implementations. (`#200 <https://github.com/ros2/rmw_cyclonedds/issues/200>`_)
-* Finalize context iff shutdown. (`#196 <https://github.com/ros2/rmw_cyclonedds/issues/196>`_)
-* Contributors: Michel Hidalgo
+* Fix lost service responses (`#183 <https://github.com/ros2/rmw_cyclonedds/issues/183>`_, `#74 <https://github.com/ros2/rmw_cyclonedds/issues/74>`_) (`#187 <https://github.com/ros2/rmw_cyclonedds/issues/187>`_) (`#209 <https://github.com/ros2/rmw_cyclonedds/issues/209>`_)
+* Contributors: Erik Boasson
 
-0.8.1 (2020-06-22)
+0.7.2 (2020-07-07)
 ------------------
-* Handle RMW_DEFAULT_DOMAIN_ID. (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_)
+* Handle RMW_DEFAULT_DOMAIN_ID (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_) (`#199 <https://github.com/ros2/rmw_cyclonedds/issues/199>`_)
 * Contributors: Michel Hidalgo
-
-0.8.0 (2020-06-18)
-------------------
-* Add support to message lost event (`#192 <https://github.com/ros2/rmw_cyclonedds/issues/192>`_)
-* Mitigate lost service responses discovery issue (`#187 <https://github.com/ros2/rmw_cyclonedds/issues/187>`_)
-* Contributors: Ivan Santiago Paunovic, eboasson
 
 0.7.1 (2020-06-02)
 ------------------
