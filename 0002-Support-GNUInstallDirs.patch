@@ -1,4 +1,4 @@
-From ee747fef1ca672959d1e13e1a505adcf304b8b52 Mon Sep 17 00:00:00 2001
+From f99d1dbac9d244b1cb1aa1d47dc9eada2d3f2c83 Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Tue, 5 May 2020 19:03:53 -0700
 Subject: [PATCH 2/3] Support GNUInstallDirs
@@ -24,5 +24,5 @@ index 951f4b6..dc1c1a6 100755
  override_dh_auto_install:
  	# In case we're installing to a non-standard location, look for a setup.sh
 -- 
-2.17.1
+2.25.1
 
