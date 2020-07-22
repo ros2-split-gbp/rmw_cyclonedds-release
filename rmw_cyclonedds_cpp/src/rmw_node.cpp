@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cassert>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -46,10 +48,12 @@
 #include "rmw/names_and_types.h"
 #include "rmw/rmw.h"
 #include "rmw/sanity_checks.h"
+#include "rmw/validate_namespace.h"
 #include "rmw/validate_node_name.h"
 
 #include "fallthrough_macro.hpp"
 #include "Serialization.hpp"
+#include "rcpputils/scope_exit.hpp"
 #include "rmw/impl/cpp/macros.hpp"
 #include "rmw/impl/cpp/key_value.hpp"
 
@@ -263,6 +267,9 @@ struct rmw_context_impl_t
   size_t node_count{0};
   std::mutex initialization_mutex;
 
+  /* Shutdown flag */
+  bool is_shutdown{false};
+
   /* suffix for GUIDs to construct unique client/service ids
      (protected by initialization_mutex) */
   uint32_t client_service_id;
@@ -280,7 +287,7 @@ struct rmw_context_impl_t
   // Initializes the participant, if it wasn't done already.
   // node_count is increased
   rmw_ret_t
-  init(rmw_init_options_t * options);
+  init(rmw_init_options_t * options, size_t domain_id);
 
   // Destroys the participant, when node_count reaches 0.
   rmw_ret_t
@@ -445,6 +452,10 @@ extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_i
 {
   RMW_CHECK_ARGUMENT_FOR_NULL(src, RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_ARGUMENT_FOR_NULL(dst, RMW_RET_INVALID_ARGUMENT);
+  if (NULL == src->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected initialized dst");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     src,
     src->implementation_identifier,
@@ -454,40 +465,43 @@ extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_i
     RMW_SET_ERROR_MSG("expected zero-initialized dst");
     return RMW_RET_INVALID_ARGUMENT;
   }
-
   const rcutils_allocator_t * allocator = &src->allocator;
-  rmw_ret_t ret = RMW_RET_OK;
 
-  allocator->deallocate(dst->enclave, allocator->state);
-  *dst = *src;
-  dst->enclave = NULL;
-  dst->security_options = rmw_get_zero_initialized_security_options();
-
-  dst->enclave = rcutils_strdup(src->enclave, *allocator);
-  if (src->enclave && !dst->enclave) {
-    ret = RMW_RET_BAD_ALLOC;
-    goto fail;
+  rmw_init_options_t tmp = *src;
+  tmp.enclave = rcutils_strdup(tmp.enclave, *allocator);
+  if (NULL != src->enclave && NULL == tmp.enclave) {
+    return RMW_RET_BAD_ALLOC;
   }
-  return rmw_security_options_copy(&src->security_options, allocator, &dst->security_options);
-fail:
-  allocator->deallocate(dst->enclave, allocator->state);
-  return ret;
+  tmp.security_options = rmw_get_zero_initialized_security_options();
+  rmw_ret_t ret =
+    rmw_security_options_copy(&src->security_options, allocator, &tmp.security_options);
+  if (RMW_RET_OK != ret) {
+    allocator->deallocate(tmp.enclave, allocator->state);
+    return ret;
+  }
+  *dst = tmp;
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_init_options_fini(rmw_init_options_t * init_options)
 {
   RMW_CHECK_ARGUMENT_FOR_NULL(init_options, RMW_RET_INVALID_ARGUMENT);
-  rcutils_allocator_t & allocator = init_options->allocator;
-  RCUTILS_CHECK_ALLOCATOR(&allocator, return RMW_RET_INVALID_ARGUMENT);
+  if (NULL == init_options->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected initialized init_options");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     init_options,
     init_options->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-  allocator.deallocate(init_options->enclave, allocator.state);
-  rmw_security_options_fini(&init_options->security_options, &allocator);
+  rcutils_allocator_t * allocator = &init_options->allocator;
+  RCUTILS_CHECK_ALLOCATOR(allocator, return RMW_RET_INVALID_ARGUMENT);
+
+  allocator->deallocate(init_options->enclave, allocator->state);
+  rmw_ret_t ret = rmw_security_options_fini(&init_options->security_options, allocator);
   *init_options = rmw_get_zero_initialized_init_options();
-  return RMW_RET_OK;
+  return ret;
 }
 
 static void convert_guid_to_gid(const dds_guid_t & guid, rmw_gid_t & gid)
@@ -912,7 +926,7 @@ rmw_ret_t configure_qos_for_security(
 }
 
 rmw_ret_t
-rmw_context_impl_t::init(rmw_init_options_t * options)
+rmw_context_impl_t::init(rmw_init_options_t * options, size_t domain_id)
 {
   std::lock_guard<std::mutex> guard(initialization_mutex);
   if (0u != this->node_count) {
@@ -925,9 +939,7 @@ rmw_context_impl_t::init(rmw_init_options_t * options)
     failed: otherwise there is a race with rmw_destroy_node deleting the last participant
     and tearing down the domain for versions of Cyclone that implement the original
     version of dds_create_domain that doesn't return a handle.  */
-  this->domain_id = static_cast<dds_domainid_t>(
-    // No custom handling of RMW_DEFAULT_DOMAIN_ID. Simply use a reasonable domain id.
-    options->domain_id != RMW_DEFAULT_DOMAIN_ID ? options->domain_id : 0u);
+  this->domain_id = static_cast<dds_domainid_t>(domain_id);
 
   if (!check_create_domain(this->domain_id, options->localhost_only)) {
     return RMW_RET_ERROR;
@@ -1107,15 +1119,25 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
 {
   rmw_ret_t ret;
 
-  static_cast<void>(options);
-  static_cast<void>(context);
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(options, RMW_RET_INVALID_ARGUMENT);
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    options->implementation_identifier,
+    "expected initialized init options",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     options,
     options->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    options->enclave,
+    "expected non-null enclave",
+    return RMW_RET_INVALID_ARGUMENT);
+  if (NULL != context->implementation_identifier) {
+    RMW_SET_ERROR_MSG("expected a zero-initialized context");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
 
   if (options->domain_id >= UINT32_MAX && options->domain_id != RMW_DEFAULT_DOMAIN_ID) {
     RCUTILS_LOG_ERROR_NAMED(
@@ -1123,47 +1145,68 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
     return RMW_RET_INVALID_ARGUMENT;
   }
 
+  auto restore_context = rcpputils::make_scope_exit(
+    [context]() {*context = rmw_get_zero_initialized_context();});
+
   context->instance_id = options->instance_id;
   context->implementation_identifier = eclipse_cyclonedds_identifier;
-  context->impl = nullptr;
+  // No custom handling of RMW_DEFAULT_DOMAIN_ID. Simply use a reasonable domain id.
+  context->actual_domain_id =
+    RMW_DEFAULT_DOMAIN_ID != options->domain_id ? options->domain_id : 0u;
+
+  context->impl = new (std::nothrow) rmw_context_impl_t();
+  if (nullptr == context->impl) {
+    RMW_SET_ERROR_MSG("failed to allocate context impl");
+    return RMW_RET_BAD_ALLOC;
+  }
+  auto cleanup_impl = rcpputils::make_scope_exit(
+    [context]() {delete context->impl;});
 
   if ((ret = rmw_init_options_copy(options, &context->options)) != RMW_RET_OK) {
     return ret;
   }
 
-  rmw_context_impl_t * impl = new(std::nothrow) rmw_context_impl_t();
-  if (nullptr == impl) {
-    return RMW_RET_BAD_ALLOC;
-  }
-
-  context->impl = impl;
+  cleanup_impl.cancel();
+  restore_context.cancel();
   return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_shutdown(rmw_context_t * context)
 {
-  RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    context->impl,
+    "expected initialized context",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     context,
     context->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-  // Nothing to do here for now.
-  // This is just the middleware's notification that shutdown was called.
+  context->impl->is_shutdown = true;
   return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_context_fini(rmw_context_t * context)
 {
-  RCUTILS_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(context, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    context->impl,
+    "expected initialized context",
+    return RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     context,
     context->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  if (!context->impl->is_shutdown) {
+    RMW_SET_ERROR_MSG("context has not been shutdown");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  rmw_ret_t ret = rmw_init_options_fini(&context->options);
   delete context->impl;
   *context = rmw_get_zero_initialized_context();
-  return RMW_RET_OK;
+  return ret;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -1173,46 +1216,71 @@ extern "C" rmw_ret_t rmw_context_fini(rmw_context_t * context)
 /////////////////////////////////////////////////////////////////////////////////////////
 
 extern "C" rmw_node_t * rmw_create_node(
-  rmw_context_t * context, const char * name,
-  const char * namespace_, size_t domain_id,
-  bool localhost_only)
+  rmw_context_t * context, const char * name, const char * namespace_)
 {
-  static_cast<void>(domain_id);
-  static_cast<void>(localhost_only);
-  RET_NULL_X(name, return nullptr);
-  RET_NULL_X(namespace_, return nullptr);
-  rmw_ret_t ret;
-  int dummy_validation_result;
-  size_t dummy_invalid_index;
-  if ((ret =
-    rmw_validate_node_name(name, &dummy_validation_result, &dummy_invalid_index)) != RMW_RET_OK)
-  {
+  RMW_CHECK_ARGUMENT_FOR_NULL(context, nullptr);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    context,
+    context->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return nullptr);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    context->impl,
+    "expected initialized context",
+    return nullptr);
+  if (context->impl->is_shutdown) {
+    RCUTILS_SET_ERROR_MSG("context has been shutdown");
     return nullptr;
   }
 
-  ret = context->impl->init(&context->options);
+  int validation_result = RMW_NODE_NAME_VALID;
+  rmw_ret_t ret = rmw_validate_node_name(name, &validation_result, nullptr);
   if (RMW_RET_OK != ret) {
     return nullptr;
   }
+  if (RMW_NODE_NAME_VALID != validation_result) {
+    const char * reason = rmw_node_name_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("invalid node name: %s", reason);
+    return nullptr;
+  }
+  validation_result = RMW_NAMESPACE_VALID;
+  ret = rmw_validate_namespace(namespace_, &validation_result, nullptr);
+  if (RMW_RET_OK != ret) {
+    return nullptr;
+  }
+  if (RMW_NAMESPACE_VALID != validation_result) {
+    const char * reason = rmw_node_name_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("invalid node namespace: %s", reason);
+    return nullptr;
+  }
 
-  auto * node_impl = new CddsNode();
-  rmw_node_t * node_handle = nullptr;
-  RET_ALLOC_X(node_impl, goto fail_node_impl);
+  ret = context->impl->init(&context->options, context->actual_domain_id);
+  if (RMW_RET_OK != ret) {
+    return nullptr;
+  }
+  auto finalize_context = rcpputils::make_scope_exit(
+    [context]() {context->impl->fini();});
 
-  node_handle = rmw_node_allocate();
-  RET_ALLOC_X(node_handle, goto fail_node_handle);
-  node_handle->implementation_identifier = eclipse_cyclonedds_identifier;
-  node_handle->data = node_impl;
-  node_handle->context = context;
+  std::unique_ptr<CddsNode> node_impl(new (std::nothrow) CddsNode());
+  RET_ALLOC_X(node_impl, return nullptr);
 
-  node_handle->name = static_cast<const char *>(rmw_allocate(sizeof(char) * strlen(name) + 1));
-  RET_ALLOC_X(node_handle->name, goto fail_node_handle_name);
-  memcpy(const_cast<char *>(node_handle->name), name, strlen(name) + 1);
+  rmw_node_t * node = rmw_node_allocate();
+  RET_ALLOC_X(node, return nullptr);
+  auto cleanup_node = rcpputils::make_scope_exit(
+    [node]() {
+      rmw_free(const_cast<char *>(node->name));
+      rmw_free(const_cast<char *>(node->namespace_));
+      rmw_node_free(node);
+    });
 
-  node_handle->namespace_ =
+  node->name = static_cast<const char *>(rmw_allocate(sizeof(char) * strlen(name) + 1));
+  RET_ALLOC_X(node->name, return nullptr);
+  memcpy(const_cast<char *>(node->name), name, strlen(name) + 1);
+
+  node->namespace_ =
     static_cast<const char *>(rmw_allocate(sizeof(char) * strlen(namespace_) + 1));
-  RET_ALLOC_X(node_handle->namespace_, goto fail_node_handle_namespace);
-  memcpy(const_cast<char *>(node_handle->namespace_), namespace_, strlen(namespace_) + 1);
+  RET_ALLOC_X(node->namespace_, return nullptr);
+  memcpy(const_cast<char *>(node->namespace_), namespace_, strlen(namespace_) + 1);
 
   {
     // Though graph_cache methods are thread safe, both cache update and publishing have to also
@@ -1232,30 +1300,28 @@ extern "C" rmw_node_t * rmw_create_node(
       // If publishing the message failed, we don't have to publish an update
       // after removing it from the graph cache */
       static_cast<void>(common->graph_cache.remove_node(common->gid, name, namespace_));
-      goto fail_pub_info;
+      return nullptr;
     }
   }
-  return node_handle;
 
-fail_pub_info:
-  rmw_free(const_cast<char *>(node_handle->namespace_));
-fail_node_handle_namespace:
-  rmw_free(const_cast<char *>(node_handle->name));
-fail_node_handle_name:
-  rmw_node_free(node_handle);
-fail_node_handle:
-  delete node_impl;
-fail_node_impl:
-  context->impl->fini();
-  return nullptr;
+  cleanup_node.cancel();
+  node->implementation_identifier = eclipse_cyclonedds_identifier;
+  node->data = node_impl.release();
+  node->context = context;
+  finalize_context.cancel();
+  return node;
 }
 
 extern "C" rmw_ret_t rmw_destroy_node(rmw_node_t * node)
 {
   rmw_ret_t result_ret = RMW_RET_OK;
-  RET_WRONG_IMPLID(node);
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
   auto node_impl = static_cast<CddsNode *>(node->data);
-  RET_NULL(node_impl);
 
   {
     // Though graph_cache methods are thread safe, both cache update and publishing have to also
@@ -1271,11 +1337,13 @@ extern "C" rmw_ret_t rmw_destroy_node(rmw_node_t * node)
       common->pub, static_cast<void *>(&participant_msg), nullptr);
   }
 
-  rmw_free(const_cast<char *>(node->name));
-  rmw_free(const_cast<char *>(node->namespace_));
-  node->context->impl->fini();
-  rmw_node_free(node);
+  rmw_context_t * context = node->context;
+  rcutils_allocator_t allocator = context->options.allocator;
+  allocator.deallocate(const_cast<char *>(node->name), allocator.state);
+  allocator.deallocate(const_cast<char *>(node->namespace_), allocator.state);
+  allocator.deallocate(node, allocator.state);
   delete node_impl;
+  context->impl->fini();
   return result_ret;
 }
 
@@ -2495,6 +2563,7 @@ static const std::unordered_map<rmw_event_type_t, uint32_t> mask_map{
   {RMW_EVENT_OFFERED_DEADLINE_MISSED, DDS_OFFERED_DEADLINE_MISSED_STATUS},
   {RMW_EVENT_REQUESTED_QOS_INCOMPATIBLE, DDS_REQUESTED_INCOMPATIBLE_QOS_STATUS},
   {RMW_EVENT_OFFERED_QOS_INCOMPATIBLE, DDS_OFFERED_INCOMPATIBLE_QOS_STATUS},
+  {RMW_EVENT_MESSAGE_LOST, DDS_SAMPLE_LOST_STATUS},
 };
 
 static bool is_event_supported(const rmw_event_type_t event_t)
@@ -2601,6 +2670,20 @@ extern "C" rmw_ret_t rmw_take_event(
           *taken = true;
           return RMW_RET_OK;
         }
+      }
+
+    case RMW_EVENT_MESSAGE_LOST: {
+        auto ei = static_cast<rmw_message_lost_status_t *>(event_info);
+        auto sub = static_cast<CddsSubscription *>(event_handle->data);
+        dds_sample_lost_status_t st;
+        if (dds_get_sample_lost_status(sub->enth, &st) < 0) {
+          *taken = false;
+          return RMW_RET_ERROR;
+        }
+        ei->total_count = static_cast<size_t>(st.total_count);
+        ei->total_count_change = static_cast<size_t>(st.total_count_change);
+        *taken = true;
+        return RMW_RET_OK;
       }
 
     case RMW_EVENT_LIVELINESS_LOST: {
