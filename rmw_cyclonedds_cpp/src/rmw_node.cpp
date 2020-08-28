@@ -102,7 +102,6 @@ using namespace std::literals::chrono_literals;
 #define RET_ALLOC_X(var, code) do {if (!var) {RET_ERR_X("failed to allocate " #var, code);} \
 } while (0)
 #define RET_WRONG_IMPLID_X(var, code) do { \
-    RET_NULL_X(var, code); \
     if ((var)->implementation_identifier != eclipse_cyclonedds_identifier) { \
       RET_ERR_X(#var " not from this implementation", code); \
     } \
@@ -115,7 +114,7 @@ using namespace std::literals::chrono_literals;
 #define RET_ERR(msg) RET_ERR_X(msg, return RMW_RET_ERROR)
 #define RET_NULL(var) RET_NULL_X(var, return RMW_RET_ERROR)
 #define RET_ALLOC(var) RET_ALLOC_X(var, return RMW_RET_ERROR)
-#define RET_WRONG_IMPLID(var) RET_WRONG_IMPLID_X(var, return RMW_RET_ERROR)
+#define RET_WRONG_IMPLID(var) RET_WRONG_IMPLID_X(var, return RMW_RET_INCORRECT_RMW_IMPLEMENTATION)
 #define RET_NULL_OR_EMPTYSTR(var) RET_NULL_OR_EMPTYSTR_X(var, return RMW_RET_ERROR)
 
 using rmw_dds_common::msg::ParticipantEntitiesInfo;
@@ -551,12 +550,21 @@ static void handle_ParticipantEntitiesInfo(dds_entity_t reader, void * arg)
 {
   static_cast<void>(reader);
   rmw_context_impl_t * impl = static_cast<rmw_context_impl_t *>(arg);
-  ParticipantEntitiesInfo msg;
   bool taken;
-  while (rmw_take(impl->common.sub, &msg, &taken, nullptr) == RMW_RET_OK && taken) {
-    // locally published data is filtered because of the subscription QoS
-    impl->common.graph_cache.update_participant_entities(msg);
-  }
+  do {
+    // TODO(iuhilnehc-ynos): Fix memory leak that string not deleted. (#224)
+    // This is a workaround to make sure calling destructor of ParticipantEntitiesInfo
+    // after calling rmw_take each time, otherwise, there will be a memory leak while
+    // deserializing a long enough buffer into a string member of NodeEntitiesInfo
+    // in ParticipantEntitiesInfo.
+    ParticipantEntitiesInfo msg;
+    if (rmw_take(impl->common.sub, &msg, &taken, nullptr) == RMW_RET_OK && taken) {
+      // locally published data is filtered because of the subscription QoS
+      impl->common.graph_cache.update_participant_entities(msg);
+    } else {
+      break;
+    }
+  } while (1);
 }
 
 static void handle_DCPSParticipant(dds_entity_t reader, void * arg)
@@ -1089,17 +1097,22 @@ rmw_context_impl_t::clean_up()
   common.graph_cache.clear_on_change_callback();
   if (common.graph_guard_condition) {
     destroy_guard_condition(common.graph_guard_condition);
+    common.graph_guard_condition = nullptr;
   }
   if (common.pub) {
     destroy_publisher(common.pub);
+    common.pub = nullptr;
   }
   if (common.sub) {
     destroy_subscription(common.sub);
+    common.sub = nullptr;
   }
   if (ppant > 0 && dds_delete(ppant) < 0) {
     RCUTILS_SAFE_FWRITE_TO_STDERR(
       "Failed to destroy domain in destructor\n");
   }
+  ppant = 0;
+
   check_destroy_domain(domain_id);
 }
 
@@ -1349,6 +1362,7 @@ extern "C" rmw_ret_t rmw_destroy_node(rmw_node_t * node)
 
 extern "C" const rmw_guard_condition_t * rmw_node_get_graph_guard_condition(const rmw_node_t * node)
 {
+  RET_NULL_X(node, return nullptr);
   RET_WRONG_IMPLID_X(node, return nullptr);
   auto node_impl = static_cast<CddsNode *>(node->data);
   RET_NULL_X(node_impl, return nullptr);
@@ -1383,13 +1397,13 @@ extern "C" rmw_ret_t rmw_serialize(
   const rosidl_message_type_support_t * type_support,
   rmw_serialized_message_t * serialized_message)
 {
-  rmw_ret_t ret;
   try {
     auto writer = rmw_cyclonedds_cpp::make_cdr_writer(
       rmw_cyclonedds_cpp::make_message_value_type(type_support));
 
     auto size = writer->get_serialized_size(ros_message);
-    if ((ret = rmw_serialized_message_resize(serialized_message, size) != RMW_RET_OK)) {
+    rmw_ret_t ret = rmw_serialized_message_resize(serialized_message, size);
+    if (RMW_RET_OK != ret) {
       RMW_SET_ERROR_MSG("rmw_serialize: failed to allocate space for message");
       return ret;
     }
@@ -1500,6 +1514,7 @@ extern "C" rmw_ret_t rmw_publish(
   rmw_publisher_allocation_t * allocation)
 {
   static_cast<void>(allocation);    // unused
+  RET_NULL(publisher);
   RET_WRONG_IMPLID(publisher);
   RET_NULL(ros_message);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
@@ -1517,6 +1532,7 @@ extern "C" rmw_ret_t rmw_publish_serialized_message(
   const rmw_serialized_message_t * serialized_message, rmw_publisher_allocation_t * allocation)
 {
   static_cast<void>(allocation);    // unused
+  RET_NULL(publisher);
   RET_WRONG_IMPLID(publisher);
   RET_NULL(serialized_message);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
@@ -2014,6 +2030,7 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
 
 extern "C" rmw_ret_t rmw_get_gid_for_publisher(const rmw_publisher_t * publisher, rmw_gid_t * gid)
 {
+  RET_NULL(publisher);
   RET_WRONG_IMPLID(publisher);
   RET_NULL(gid);
   auto pub = static_cast<const CddsPublisher *>(publisher->data);
@@ -2029,7 +2046,9 @@ extern "C" rmw_ret_t rmw_compare_gids_equal(
   const rmw_gid_t * gid1, const rmw_gid_t * gid2,
   bool * result)
 {
+  RET_NULL(gid1);
   RET_WRONG_IMPLID(gid1);
+  RET_NULL(gid2);
   RET_WRONG_IMPLID(gid2);
   RET_NULL(result);
   /* alignment is potentially lost because of the translation to an array of bytes, so use
@@ -2042,19 +2061,27 @@ extern "C" rmw_ret_t rmw_publisher_count_matched_subscriptions(
   const rmw_publisher_t * publisher,
   size_t * subscription_count)
 {
-  RET_WRONG_IMPLID(publisher);
+  RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    publisher,
+    publisher->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(subscription_count, RMW_RET_INVALID_ARGUMENT);
+
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   dds_publication_matched_status_t status;
   if (dds_get_publication_matched_status(pub->enth, &status) < 0) {
     return RMW_RET_ERROR;
-  } else {
-    *subscription_count = status.current_count;
-    return RMW_RET_OK;
   }
+
+  *subscription_count = status.current_count;
+  return RMW_RET_OK;
 }
 
 rmw_ret_t rmw_publisher_assert_liveliness(const rmw_publisher_t * publisher)
 {
+  RET_NULL(publisher);
   RET_WRONG_IMPLID(publisher);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   if (dds_assert_liveliness(pub->enth) < 0) {
@@ -2373,15 +2400,22 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
 extern "C" rmw_ret_t rmw_subscription_count_matched_publishers(
   const rmw_subscription_t * subscription, size_t * publisher_count)
 {
-  RET_WRONG_IMPLID(subscription);
+  RMW_CHECK_ARGUMENT_FOR_NULL(subscription, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    subscription,
+    subscription->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(publisher_count, RMW_RET_INVALID_ARGUMENT);
+
   auto sub = static_cast<CddsSubscription *>(subscription->data);
   dds_subscription_matched_status_t status;
   if (dds_get_subscription_matched_status(sub->enth, &status) < 0) {
     return RMW_RET_ERROR;
-  } else {
-    *publisher_count = status.current_count;
-    return RMW_RET_OK;
   }
+
+  *publisher_count = status.current_count;
+  return RMW_RET_OK;
 }
 
 extern "C" rmw_ret_t rmw_subscription_get_actual_qos(
@@ -2480,6 +2514,7 @@ static rmw_ret_t rmw_take_int(
 {
   RET_NULL(taken);
   RET_NULL(ros_message);
+  RET_NULL(subscription);
   RET_WRONG_IMPLID(subscription);
   CddsSubscription * sub = static_cast<CddsSubscription *>(subscription->data);
   RET_NULL(sub);
@@ -2522,6 +2557,7 @@ static rmw_ret_t rmw_take_seq(
   RET_NULL(taken);
   RET_NULL(message_sequence);
   RET_NULL(message_info_sequence);
+  RET_NULL(subscription);
   RET_WRONG_IMPLID(subscription);
 
   if (count > message_sequence->capacity) {
@@ -2601,6 +2637,7 @@ static rmw_ret_t rmw_take_ser_int(
 {
   RET_NULL(taken);
   RET_NULL(serialized_message);
+  RET_NULL(subscription);
   RET_WRONG_IMPLID(subscription);
   CddsSubscription * sub = static_cast<CddsSubscription *>(subscription->data);
   RET_NULL(sub);
@@ -2769,7 +2806,8 @@ static rmw_ret_t init_rmw_event(
 extern "C" rmw_ret_t rmw_publisher_event_init(
   rmw_event_t * rmw_event, const rmw_publisher_t * publisher, rmw_event_type_t event_type)
 {
-  RET_WRONG_IMPLID_X(publisher, return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RET_NULL(publisher);
+  RET_WRONG_IMPLID(publisher);
   return init_rmw_event(
     rmw_event,
     publisher->implementation_identifier,
@@ -2780,7 +2818,8 @@ extern "C" rmw_ret_t rmw_publisher_event_init(
 extern "C" rmw_ret_t rmw_subscription_event_init(
   rmw_event_t * rmw_event, const rmw_subscription_t * subscription, rmw_event_type_t event_type)
 {
-  RET_WRONG_IMPLID_X(subscription, return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RET_NULL(subscription);
+  RET_WRONG_IMPLID(subscription);
   return init_rmw_event(
     rmw_event,
     subscription->implementation_identifier,
@@ -2792,6 +2831,7 @@ extern "C" rmw_ret_t rmw_take_event(
   const rmw_event_t * event_handle, void * event_info,
   bool * taken)
 {
+  RET_NULL(event_handle);
   RET_WRONG_IMPLID(event_handle);
   RET_NULL(taken);
   RET_NULL(event_info);
@@ -2966,6 +3006,7 @@ extern "C" rmw_ret_t rmw_destroy_guard_condition(rmw_guard_condition_t * guard_c
 extern "C" rmw_ret_t rmw_trigger_guard_condition(
   const rmw_guard_condition_t * guard_condition_handle)
 {
+  RET_NULL(guard_condition_handle);
   RET_WRONG_IMPLID(guard_condition_handle);
   auto * gcond_impl = static_cast<CddsGuardCondition *>(guard_condition_handle->data);
   dds_set_guardcondition(gcond_impl->gcondh, true);
@@ -3034,6 +3075,7 @@ fail_alloc_wait_set:
 
 extern "C" rmw_ret_t rmw_destroy_wait_set(rmw_wait_set_t * wait_set)
 {
+  RET_NULL(wait_set);
   RET_WRONG_IMPLID(wait_set);
   auto result = RMW_RET_OK;
   auto ws = static_cast<CddsWaitset *>(wait_set->data);
@@ -3419,6 +3461,7 @@ extern "C" rmw_ret_t rmw_take_response(
   rmw_service_info_t * request_header, void * ros_response,
   bool * taken)
 {
+  RET_NULL(client);
   RET_WRONG_IMPLID(client);
   auto info = static_cast<CddsClient *>(client->data);
   dds_time_t source_timestamp;
@@ -3466,6 +3509,7 @@ extern "C" rmw_ret_t rmw_take_request(
   rmw_service_info_t * request_header, void * ros_request,
   bool * taken)
 {
+  RET_NULL(service);
   RET_WRONG_IMPLID(service);
   auto info = static_cast<CddsService *>(service->data);
   return rmw_take_response_request(
@@ -3540,6 +3584,7 @@ extern "C" rmw_ret_t rmw_send_response(
   const rmw_service_t * service,
   rmw_request_id_t * request_header, void * ros_response)
 {
+  RET_NULL(service);
   RET_WRONG_IMPLID(service);
   RET_NULL(request_header);
   RET_NULL(ros_response);
@@ -3589,6 +3634,7 @@ extern "C" rmw_ret_t rmw_send_request(
   int64_t * sequence_id)
 {
   static std::atomic_uint next_request_id;
+  RET_NULL(client);
   RET_WRONG_IMPLID(client);
   RET_NULL(ros_request);
   RET_NULL(sequence_id);
@@ -3660,6 +3706,7 @@ static rmw_ret_t rmw_init_cs(
   const char * service_name, const rmw_qos_profile_t * qos_policies,
   bool is_service)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   RET_NULL_OR_EMPTYSTR(service_name);
   RET_NULL(qos_policies);
@@ -3793,7 +3840,9 @@ static void rmw_fini_cs(CddsCS * cs)
 
 static rmw_ret_t destroy_client(const rmw_node_t * node, rmw_client_t * client)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
+  RET_NULL(client);
   RET_WRONG_IMPLID(client);
   auto info = static_cast<CddsClient *>(client->data);
   clean_waitset_caches();
@@ -3885,7 +3934,9 @@ extern "C" rmw_ret_t rmw_destroy_client(rmw_node_t * node, rmw_client_t * client
 
 static rmw_ret_t destroy_service(const rmw_node_t * node, rmw_service_t * service)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
+  RET_NULL(service);
   RET_WRONG_IMPLID(service);
   auto info = static_cast<CddsService *>(service->data);
   clean_waitset_caches();
@@ -3984,6 +4035,7 @@ extern "C" rmw_ret_t rmw_get_node_names(
   rcutils_string_array_t * node_names,
   rcutils_string_array_t * node_namespaces)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names) ||
     RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces))
@@ -4006,6 +4058,7 @@ extern "C" rmw_ret_t rmw_get_node_names_with_enclaves(
   rcutils_string_array_t * node_namespaces,
   rcutils_string_array_t * enclaves)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names) ||
     RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces))
@@ -4027,6 +4080,7 @@ extern "C" rmw_ret_t rmw_get_topic_names_and_types(
   rcutils_allocator_t * allocator,
   bool no_demangle, rmw_names_and_types_t * tptyp)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   RET_NULL(allocator);
   rmw_ret_t ret = rmw_names_and_types_check_zero(tptyp);
@@ -4126,7 +4180,9 @@ extern "C" rmw_ret_t rmw_service_server_is_available(
   const rmw_client_t * client,
   bool * is_available)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
+  RET_NULL(client);
   RET_WRONG_IMPLID(client);
   RET_NULL(is_available);
   *is_available = false;
@@ -4195,6 +4251,7 @@ static rmw_ret_t get_topic_names_and_types_by_node(
   GetNamesAndTypesByNodeFunction get_names_and_types_by_node,
   rmw_names_and_types_t * topic_names_and_types)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   RET_NULL(allocator);
   RET_NULL(node_name);
@@ -4324,6 +4381,7 @@ extern "C" rmw_ret_t rmw_get_publishers_info_by_topic(
   bool no_mangle,
   rmw_topic_endpoint_info_array_t * publishers_info)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   RET_NULL(allocator);
   RET_NULL(topic_name);
@@ -4349,6 +4407,7 @@ extern "C" rmw_ret_t rmw_get_subscriptions_info_by_topic(
   bool no_mangle,
   rmw_topic_endpoint_info_array_t * subscriptions_info)
 {
+  RET_NULL(node);
   RET_WRONG_IMPLID(node);
   RET_NULL(allocator);
   RET_NULL(topic_name);
