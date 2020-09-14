@@ -59,9 +59,9 @@
 
 #include "TypeSupport2.hpp"
 
-#include "rmw_cyclonedds_cpp/rmw_version_test.hpp"
-#include "rmw_cyclonedds_cpp/MessageTypeSupport.hpp"
-#include "rmw_cyclonedds_cpp/ServiceTypeSupport.hpp"
+#include "rmw_version_test.hpp"
+#include "MessageTypeSupport.hpp"
+#include "ServiceTypeSupport.hpp"
 
 #include "rmw/get_topic_endpoint_info.h"
 #include "rmw/incompatible_qos_events_statuses.h"
@@ -77,7 +77,7 @@
 
 #include "dds/dds.h"
 #include "dds/ddsi/ddsi_sertopic.h"
-#include "rmw_cyclonedds_cpp/serdes.hpp"
+#include "serdes.hpp"
 #include "serdata.hpp"
 #include "demangle.hpp"
 
@@ -333,8 +333,8 @@ struct client_service_id_t
 
 struct CddsCS
 {
-  CddsPublisher * pub;
-  CddsSubscription * sub;
+  std::unique_ptr<CddsPublisher> pub;
+  std::unique_ptr<CddsSubscription> sub;
   client_service_id_t id;
 };
 
@@ -550,21 +550,12 @@ static void handle_ParticipantEntitiesInfo(dds_entity_t reader, void * arg)
 {
   static_cast<void>(reader);
   rmw_context_impl_t * impl = static_cast<rmw_context_impl_t *>(arg);
+  ParticipantEntitiesInfo msg;
   bool taken;
-  do {
-    // TODO(iuhilnehc-ynos): Fix memory leak that string not deleted. (#224)
-    // This is a workaround to make sure calling destructor of ParticipantEntitiesInfo
-    // after calling rmw_take each time, otherwise, there will be a memory leak while
-    // deserializing a long enough buffer into a string member of NodeEntitiesInfo
-    // in ParticipantEntitiesInfo.
-    ParticipantEntitiesInfo msg;
-    if (rmw_take(impl->common.sub, &msg, &taken, nullptr) == RMW_RET_OK && taken) {
-      // locally published data is filtered because of the subscription QoS
-      impl->common.graph_cache.update_participant_entities(msg);
-    } else {
-      break;
-    }
-  } while (1);
+  while (rmw_take(impl->common.sub, &msg, &taken, nullptr) == RMW_RET_OK && taken) {
+    // locally published data is filtered because of the subscription QoS
+    impl->common.graph_cache.update_participant_entities(msg);
+  }
 }
 
 static void handle_DCPSParticipant(dds_entity_t reader, void * arg)
@@ -1514,9 +1505,15 @@ extern "C" rmw_ret_t rmw_publish(
   rmw_publisher_allocation_t * allocation)
 {
   static_cast<void>(allocation);    // unused
-  RET_NULL(publisher);
-  RET_WRONG_IMPLID(publisher);
-  RET_NULL(ros_message);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    publisher, "publisher handle is null",
+    return RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    publisher, publisher->implementation_identifier, eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    ros_message, "ros message handle is null",
+    return RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   assert(pub);
   if (dds_write(pub->enth, ros_message) >= 0) {
@@ -1532,9 +1529,15 @@ extern "C" rmw_ret_t rmw_publish_serialized_message(
   const rmw_serialized_message_t * serialized_message, rmw_publisher_allocation_t * allocation)
 {
   static_cast<void>(allocation);    // unused
-  RET_NULL(publisher);
-  RET_WRONG_IMPLID(publisher);
-  RET_NULL(serialized_message);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    publisher, "publisher handle is null",
+    return RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    publisher, publisher->implementation_identifier, eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_FOR_NULL_WITH_MSG(
+    serialized_message, "serialized message handle is null",
+    return RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   struct ddsi_serdata * d = serdata_rmw_from_serialized_message(
     pub->sertopic, serialized_message->buffer, serialized_message->buffer_length);
@@ -3713,8 +3716,8 @@ static rmw_ret_t rmw_init_cs(
   const rosidl_service_type_support_t * type_support = get_service_typesupport(type_supports);
   RET_NULL(type_support);
 
-  auto pub = new CddsPublisher();
-  auto sub = new CddsSubscription();
+  auto pub = std::make_unique<CddsPublisher>();
+  auto sub = std::make_unique<CddsSubscription>();
   std::string subtopic_name, pubtopic_name;
   void * pub_type_support, * sub_type_support;
 
@@ -3811,8 +3814,8 @@ static rmw_ret_t rmw_init_cs(
   dds_delete(subtopic);
   dds_delete(pubtopic);
 
-  cs->pub = pub;
-  cs->sub = sub;
+  cs->pub = std::move(pub);
+  cs->sub = std::move(sub);
   return RMW_RET_OK;
 
 fail_instance_handle:
@@ -3868,6 +3871,7 @@ static rmw_ret_t destroy_client(const rmw_node_t * node, rmw_client_t * client)
   }
 
   rmw_fini_cs(&info->client);
+  delete info;
   rmw_free(const_cast<char *>(client->service_name));
   rmw_client_free(client);
   return RMW_RET_OK;
@@ -3924,6 +3928,7 @@ fail_service_name:
   rmw_client_free(rmw_client);
 fail_client:
   rmw_fini_cs(&info->client);
+  delete info;
   return nullptr;
 }
 
@@ -3962,6 +3967,7 @@ static rmw_ret_t destroy_service(const rmw_node_t * node, rmw_service_t * servic
   }
 
   rmw_fini_cs(&info->service);
+  delete info;
   rmw_free(const_cast<char *>(service->service_name));
   rmw_service_free(service);
   return RMW_RET_OK;
@@ -4016,6 +4022,7 @@ fail_service_name:
   rmw_service_free(rmw_service);
 fail_service:
   rmw_fini_cs(&info->service);
+  delete info;
   return nullptr;
 }
 
