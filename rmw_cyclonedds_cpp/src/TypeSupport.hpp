@@ -13,12 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
-#define RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
-
-#include <rosidl_runtime_c/string.h>
-#include <rosidl_runtime_c/string_functions.h>
-#include <rosidl_runtime_c/u16string_functions.h>
+#ifndef TYPESUPPORT_HPP_
+#define TYPESUPPORT_HPP_
 
 #include <cassert>
 #include <string>
@@ -26,17 +22,19 @@
 
 #include "rcutils/logging_macros.h"
 
+#include "rosidl_runtime_c/string.h"
+#include "rosidl_runtime_c/string_functions.h"
+#include "rosidl_runtime_c/u16string_functions.h"
+
 #include "rosidl_typesupport_introspection_cpp/field_types.hpp"
 #include "rosidl_typesupport_introspection_cpp/identifier.hpp"
 #include "rosidl_typesupport_introspection_cpp/message_introspection.hpp"
 #include "rosidl_typesupport_introspection_cpp/service_introspection.hpp"
-#include "rosidl_typesupport_introspection_cpp/visibility_control.h"
 
 #include "rosidl_typesupport_introspection_c/field_types.h"
 #include "rosidl_typesupport_introspection_c/identifier.h"
 #include "rosidl_typesupport_introspection_c/message_introspection.h"
 #include "rosidl_typesupport_introspection_c/service_introspection.h"
-#include "rosidl_typesupport_introspection_c/visibility_control.h"
 
 #include "serdes.hpp"
 
@@ -78,7 +76,7 @@ struct StringHelper<rosidl_typesupport_introspection_c__MessageMembers>
     return std::string(data.data);
   }
 
-  static void assign(cycdeser & deser, void * field, bool)
+  static void assign(cycdeser & deser, void * field)
   {
     std::string str;
     deser >> str;
@@ -98,12 +96,9 @@ struct StringHelper<rosidl_typesupport_introspection_cpp::MessageMembers>
     return *(static_cast<std::string *>(data));
   }
 
-  static void assign(cycdeser & deser, void * field, bool call_new)
+  static void assign(cycdeser & deser, void * field)
   {
     std::string & str = *(std::string *)field;
-    if (call_new) {
-      new(&str) std::string;
-    }
     deser >> str;
   }
 };
@@ -131,8 +126,7 @@ protected:
 
 private:
   bool deserializeROSmessage(
-    cycdeser & deser, const MembersType * members, void * ros_message,
-    bool call_new);
+    cycdeser & deser, const MembersType * members, void * ros_message);
   bool printROSmessage(
     cycprint & deser, const MembersType * members);
 };
@@ -141,4 +135,4 @@ private:
 
 #include "TypeSupport_impl.hpp"
 
-#endif  // RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
+#endif  // TYPESUPPORT_HPP_
