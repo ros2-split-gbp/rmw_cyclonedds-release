@@ -1,0 +1,29 @@
+From ab6dcba53475c842f2182ece8761b87d5f668fda Mon Sep 17 00:00:00 2001
+From: Jacob Perron <jacob@openrobotics.org>
+Date: Tue, 5 May 2020 18:19:45 -0700
+Subject: [PATCH] Tell shlibdeps where to find cyclonedds libraries
+
+Support GNUInstallDirs.
+This helps shlibdeps find cyclonedds libraries.
+
+Signed-off-by: Jacob Perron <jacob@openrobotics.org>
+---
+ debian/rules.em | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/debian/rules.em b/debian/rules.em
+index eb57e64..03f2b8e 100755
+--- a/debian/rules.em
++++ b/debian/rules.em
+@@ -50,7 +50,7 @@ override_dh_shlibdeps:
+ 	# in the install tree and source it.  It will set things like
+ 	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+ 	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_shlibdeps -l$(CURDIR)/debian/@(Package)/@(InstallationPrefix)/lib/
++	dh_shlibdeps -l$(CURDIR)/debian/@(Package)/@(InstallationPrefix)/lib/:$(CURDIR)/debian/@(Package)/@(InstallationPrefix)/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH)/:@(InstallationPrefix)/lib/:@(InstallationPrefix)/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH)/
+ 
+ override_dh_auto_install:
+ 	# In case we're installing to a non-standard location, look for a setup.sh
+-- 
+2.25.1
+
