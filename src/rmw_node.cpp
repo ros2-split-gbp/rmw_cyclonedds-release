@@ -2033,11 +2033,14 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
 
 extern "C" rmw_ret_t rmw_get_gid_for_publisher(const rmw_publisher_t * publisher, rmw_gid_t * gid)
 {
-  RET_NULL(publisher);
-  RET_WRONG_IMPLID(publisher);
-  RET_NULL(gid);
+  RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    publisher,
+    publisher->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(gid, RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<const CddsPublisher *>(publisher->data);
-  RET_NULL(pub);
   gid->implementation_identifier = eclipse_cyclonedds_identifier;
   memset(gid->data, 0, sizeof(gid->data));
   assert(sizeof(pub->pubiid) <= sizeof(gid->data));
@@ -2049,11 +2052,19 @@ extern "C" rmw_ret_t rmw_compare_gids_equal(
   const rmw_gid_t * gid1, const rmw_gid_t * gid2,
   bool * result)
 {
-  RET_NULL(gid1);
-  RET_WRONG_IMPLID(gid1);
-  RET_NULL(gid2);
-  RET_WRONG_IMPLID(gid2);
-  RET_NULL(result);
+  RMW_CHECK_ARGUMENT_FOR_NULL(gid1, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    gid1,
+    gid1->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(gid2, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    gid2,
+    gid2->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(result, RMW_RET_INVALID_ARGUMENT);
   /* alignment is potentially lost because of the translation to an array of bytes, so use
      memcmp instead of a simple integer comparison */
   *result = memcmp(gid1->data, gid2->data, sizeof(gid1->data)) == 0;
@@ -2524,9 +2535,6 @@ static rmw_ret_t rmw_take_int(
   RMW_CHECK_ARGUMENT_FOR_NULL(
     subscription, RMW_RET_INVALID_ARGUMENT);
 
-  RMW_CHECK_ARGUMENT_FOR_NULL(
-    message_info, RMW_RET_INVALID_ARGUMENT);
-
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
     subscription handle,
     subscription->implementation_identifier, eclipse_cyclonedds_identifier,
@@ -2724,6 +2732,7 @@ extern "C" rmw_ret_t rmw_take_with_info(
   rmw_subscription_allocation_t * allocation)
 {
   static_cast<void>(allocation);
+  RMW_CHECK_ARGUMENT_FOR_NULL(message_info, RMW_RET_INVALID_ARGUMENT);
   return rmw_take_int(subscription, ros_message, taken, message_info);
 }
 
@@ -4081,12 +4090,17 @@ extern "C" rmw_ret_t rmw_get_node_names(
   rcutils_string_array_t * node_names,
   rcutils_string_array_t * node_namespaces)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names) ||
-    RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces))
-  {
-    return RMW_RET_ERROR;
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces)) {
+    return RMW_RET_INVALID_ARGUMENT;
   }
 
   auto common_context = &node->context->impl->common;
@@ -4104,12 +4118,20 @@ extern "C" rmw_ret_t rmw_get_node_names_with_enclaves(
   rcutils_string_array_t * node_namespaces,
   rcutils_string_array_t * enclaves)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names) ||
-    RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces))
-  {
-    return RMW_RET_ERROR;
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_names)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(node_namespaces)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  if (RMW_RET_OK != rmw_check_zero_rmw_string_array(enclaves)) {
+    return RMW_RET_INVALID_ARGUMENT;
   }
 
   auto common_context = &node->context->impl->common;
@@ -4126,12 +4148,16 @@ extern "C" rmw_ret_t rmw_get_topic_names_and_types(
   rcutils_allocator_t * allocator,
   bool no_demangle, rmw_names_and_types_t * tptyp)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  RET_NULL(allocator);
-  rmw_ret_t ret = rmw_names_and_types_check_zero(tptyp);
-  if (ret != RMW_RET_OK) {
-    return ret;
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ALLOCATOR_WITH_MSG(
+    allocator, "allocator argument is invalid", return RMW_RET_INVALID_ARGUMENT);
+  if (RMW_RET_OK != rmw_names_and_types_check_zero(tptyp)) {
+    return RMW_RET_INVALID_ARGUMENT;
   }
 
   DemangleFunction demangle_topic = _demangle_ros_topic_from_topic;
@@ -4153,6 +4179,18 @@ extern "C" rmw_ret_t rmw_get_service_names_and_types(
   rcutils_allocator_t * allocator,
   rmw_names_and_types_t * sntyp)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ALLOCATOR_WITH_MSG(
+    allocator, "allocator argument is invalid", return RMW_RET_INVALID_ARGUMENT);
+  if (RMW_RET_OK != rmw_names_and_types_check_zero(sntyp)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
   auto common_context = &node->context->impl->common;
   return common_context->graph_cache.get_names_and_types(
     _demangle_service_from_topic,
@@ -4263,6 +4301,25 @@ extern "C" rmw_ret_t rmw_count_publishers(
   const rmw_node_t * node, const char * topic_name,
   size_t * count)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(topic_name, RMW_RET_INVALID_ARGUMENT);
+  int validation_result = RMW_TOPIC_VALID;
+  rmw_ret_t ret = rmw_validate_full_topic_name(topic_name, &validation_result, nullptr);
+  if (RMW_RET_OK != ret) {
+    return ret;
+  }
+  if (RMW_TOPIC_VALID != validation_result) {
+    const char * reason = rmw_full_topic_name_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("topic_name argument is invalid: %s", reason);
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  RMW_CHECK_ARGUMENT_FOR_NULL(count, RMW_RET_INVALID_ARGUMENT);
+
   auto common_context = &node->context->impl->common;
   const std::string mangled_topic_name = make_fqtopic(ROS_TOPIC_PREFIX, topic_name, "", false);
   return common_context->graph_cache.get_writer_count(mangled_topic_name, count);
@@ -4272,6 +4329,25 @@ extern "C" rmw_ret_t rmw_count_subscribers(
   const rmw_node_t * node, const char * topic_name,
   size_t * count)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(topic_name, RMW_RET_INVALID_ARGUMENT);
+  int validation_result = RMW_TOPIC_VALID;
+  rmw_ret_t ret = rmw_validate_full_topic_name(topic_name, &validation_result, nullptr);
+  if (RMW_RET_OK != ret) {
+    return ret;
+  }
+  if (RMW_TOPIC_VALID != validation_result) {
+    const char * reason = rmw_full_topic_name_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("topic_name argument is invalid: %s", reason);
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  RMW_CHECK_ARGUMENT_FOR_NULL(count, RMW_RET_INVALID_ARGUMENT);
+
   auto common_context = &node->context->impl->common;
   const std::string mangled_topic_name = make_fqtopic(ROS_TOPIC_PREFIX, topic_name, "", false);
   return common_context->graph_cache.get_reader_count(mangled_topic_name, count);
@@ -4297,12 +4373,39 @@ static rmw_ret_t get_topic_names_and_types_by_node(
   GetNamesAndTypesByNodeFunction get_names_and_types_by_node,
   rmw_names_and_types_t * topic_names_and_types)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  RET_NULL(allocator);
-  RET_NULL(node_name);
-  RET_NULL(node_namespace);
-  RET_NULL(topic_names_and_types);
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ALLOCATOR_WITH_MSG(
+    allocator, "allocator argument is invalid", return RMW_RET_INVALID_ARGUMENT);
+  int validation_result = RMW_NODE_NAME_VALID;
+  rmw_ret_t ret = rmw_validate_node_name(node_name, &validation_result, nullptr);
+  if (RMW_RET_OK != ret) {
+    return ret;
+  }
+  if (RMW_NODE_NAME_VALID != validation_result) {
+    const char * reason = rmw_node_name_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("node_name argument is invalid: %s", reason);
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  validation_result = RMW_NAMESPACE_VALID;
+  ret = rmw_validate_namespace(node_namespace, &validation_result, nullptr);
+  if (RMW_RET_OK != ret) {
+    return ret;
+  }
+  if (RMW_NAMESPACE_VALID != validation_result) {
+    const char * reason = rmw_namespace_validation_result_string(validation_result);
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("node_namespace argument is invalid: %s", reason);
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+  ret = rmw_names_and_types_check_zero(topic_names_and_types);
+  if (RMW_RET_OK != ret) {
+    return ret;
+  }
+
   auto common_context = &node->context->impl->common;
   if (no_demangle) {
     demangle_topic = _identity_demangle;
@@ -4427,11 +4530,19 @@ extern "C" rmw_ret_t rmw_get_publishers_info_by_topic(
   bool no_mangle,
   rmw_topic_endpoint_info_array_t * publishers_info)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  RET_NULL(allocator);
-  RET_NULL(topic_name);
-  RET_NULL(publishers_info);
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ALLOCATOR_WITH_MSG(
+    allocator, "allocator argument is invalid", return RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(topic_name, RMW_RET_INVALID_ARGUMENT);
+  if (RMW_RET_OK != rmw_topic_endpoint_info_array_check_zero(publishers_info)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
   auto common_context = &node->context->impl->common;
   std::string mangled_topic_name = topic_name;
   DemangleFunction demangle_type = _identity_demangle;
@@ -4453,11 +4564,19 @@ extern "C" rmw_ret_t rmw_get_subscriptions_info_by_topic(
   bool no_mangle,
   rmw_topic_endpoint_info_array_t * subscriptions_info)
 {
-  RET_NULL(node);
-  RET_WRONG_IMPLID(node);
-  RET_NULL(allocator);
-  RET_NULL(topic_name);
-  RET_NULL(subscriptions_info);
+  RMW_CHECK_ARGUMENT_FOR_NULL(node, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    node,
+    node->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ALLOCATOR_WITH_MSG(
+    allocator, "allocator argument is invalid", return RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(topic_name, RMW_RET_INVALID_ARGUMENT);
+  if (RMW_RET_OK != rmw_topic_endpoint_info_array_check_zero(subscriptions_info)) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
   auto common_context = &node->context->impl->common;
   std::string mangled_topic_name = topic_name;
   DemangleFunction demangle_type = _identity_demangle;
