@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef DESERIALIZATION_EXCEPTION_HPP_
-#define DESERIALIZATION_EXCEPTION_HPP_
+#ifndef RMW_CYCLONEDDS_CPP__DESERIALIZATION_EXCEPTION_HPP_
+#define RMW_CYCLONEDDS_CPP__DESERIALIZATION_EXCEPTION_HPP_
 
-#include "exception.hpp"
+#include "rmw_cyclonedds_cpp/exception.hpp"
 
 namespace rmw_cyclonedds_cpp
 {
@@ -34,4 +34,4 @@ public:
 
 }  // namespace rmw_cyclonedds_cpp
 
-#endif  // DESERIALIZATION_EXCEPTION_HPP_
+#endif  // RMW_CYCLONEDDS_CPP__DESERIALIZATION_EXCEPTION_HPP_

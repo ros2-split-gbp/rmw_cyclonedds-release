@@ -2,103 +2,20 @@
 Changelog for package rmw_cyclonedds_cpp
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-0.18.3 (2020-09-29)
--------------------
-* Return RMW_RET_UNSUPPORTED in rmw_get_serialized_message_size (`#250 <https://github.com/ros2/rmw_cyclonedds/issues/250>`_)
-* Update service/client request/response API error returns (`#249 <https://github.com/ros2/rmw_cyclonedds/issues/249>`_)
-* Contributors: Alejandro Hernández Cordero, Jose Tomas Lorente
-
-0.18.2 (2020-09-25)
--------------------
-* Updated publisher/subscription allocation and wait set API return codes (`#246 <https://github.com/ros2/rmw_cyclonedds/issues/246>`_)
-* Contributors: Alejandro Hernández Cordero
-
-0.18.1 (2020-09-24)
--------------------
-* Fix array `get_function` semantics (`#248 <https://github.com/ros2/rmw_cyclonedds/issues/248>`_)
-* Update service/client construction/destruction API return codes. (`#247 <https://github.com/ros2/rmw_cyclonedds/issues/247>`_)
-* Contributors: Ivan Santiago Paunovic, Michel Hidalgo
-
-0.18.0 (2020-09-23)
--------------------
-* Update gid API return codes. (`#244 <https://github.com/ros2/rmw_cyclonedds/issues/244>`_)
-* Update graph API return codes. (`#243 <https://github.com/ros2/rmw_cyclonedds/issues/243>`_)
-* Check for message_info on take where appropriate. (`#245 <https://github.com/ros2/rmw_cyclonedds/issues/245>`_)
-  Fix for regression introduced in `#241 <https://github.com/ros2/rmw_cyclonedds/issues/241>`_.
-* Contributors: Michel Hidalgo
-
-0.17.0 (2020-09-18)
--------------------
-* Updated error returns on rmw_take_serialized() and rmw_take_with_message_info() (`#242 <https://github.com/ros2/rmw_cyclonedds/issues/242>`_)
-* Updated error returns on rmw_take() (`#241 <https://github.com/ros2/rmw_cyclonedds/issues/241>`_)
-* Add quality declaration for Cyclone DDS (`#218 <https://github.com/ros2/rmw_cyclonedds/issues/218>`_)
-* Contributors: Erik Boasson, Joe Speed, Jose Tomas Lorente, Scott K Logan 
-
-0.16.0 (2020-09-14)
--------------------
-* Fix that not to delete some objects after destroying functions (`#236 <https://github.com/ros2/rmw_cyclonedds/issues/236>`_)
-* Update rmw_publish_serialized_message() error returns (`#240 <https://github.com/ros2/rmw_cyclonedds/issues/240>`_)
-* Update rmw_publish() error returns (`#239 <https://github.com/ros2/rmw_cyclonedds/issues/239>`_)
-* Remove public declarations (`#230 <https://github.com/ros2/rmw_cyclonedds/issues/230>`_)
-* Use quotes for non-system includes (`#231 <https://github.com/ros2/rmw_cyclonedds/issues/231>`_)
-* Use correct functions to resize and get an item, avoiding memory leaks in typesupport code (`#228 <https://github.com/ros2/rmw_cyclonedds/issues/228>`_)
-* Contributors: Chen Lihui, Dan Rose, Lobotuerk
-
-0.15.0 (2020-08-28)
--------------------
-* Fix context cleanup. (`#227 <https://github.com/ros2/rmw_cyclonedds/issues/227>`_)
-* Fix memory leak that type support not deleted. (`#225 <https://github.com/ros2/rmw_cyclonedds/issues/225>`_)
-* Ensure compliant matched pub/sub count API. (`#223 <https://github.com/ros2/rmw_cyclonedds/issues/223>`_)
-* Fix memory leak that string not deleted. (`#224 <https://github.com/ros2/rmw_cyclonedds/issues/224>`_)
-* Change RET_WRONG_IMPLID() to return RMW_RET_INCORRECT_IMPLEMENTATION (`#226 <https://github.com/ros2/rmw_cyclonedds/issues/226>`_)
-* Fix bad conditional in rmw_serialize(). (`#217 <https://github.com/ros2/rmw_cyclonedds/issues/217>`_)
-* Contributors: Chen Lihui, Michel Hidalgo
-
-0.14.0 (2020-08-06)
--------------------
-* Ensure compliant subscription API. (`#214 <https://github.com/ros2/rmw_cyclonedds/issues/214>`_)
-* Contributors: Michel Hidalgo
-
-0.13.0 (2020-07-30)
--------------------
-* Ensure compliant publisher API (`#210 <https://github.com/ros2/rmw_cyclonedds/issues/210>`_)
-* rmw_destroy_node must remove node from graph cache (`#213 <https://github.com/ros2/rmw_cyclonedds/issues/213>`_)
-* Add space between 'ROS' and '2' (`#195 <https://github.com/ros2/rmw_cyclonedds/issues/195>`_)
-* Contributors: Christophe Bedard, Erik Boasson, Michel Hidalgo
-
-0.12.0 (2020-07-22)
--------------------
-* Set context actual domain id (`#208 <https://github.com/ros2/rmw_cyclonedds/issues/208>`_)
-* Contributors: Ivan Santiago Paunovic
-
-0.11.0 (2020-07-20)
--------------------
-* Ensure compliant node construction/destruction API (`#206 <https://github.com/ros2/rmw_cyclonedds/issues/206>`_)
-* Contributors: Michel Hidalgo
-
-0.10.0 (2020-07-08)
--------------------
-* Remove domain_id and localhost_only from node API (`#205 <https://github.com/ros2/rmw_cyclonedds/issues/205>`_)
-* Amend rmw_init() implementation: require enclave. (`#204 <https://github.com/ros2/rmw_cyclonedds/issues/204>`_)
-* Contributors: Ivan Santiago Paunovic, Michel Hidalgo
-
-0.9.0 (2020-06-29)
+0.7.4 (2020-10-07)
 ------------------
-* Ensure compliant init/shutdown API implementations. (`#202 <https://github.com/ros2/rmw_cyclonedds/issues/202>`_)
-* Ensure compliant init options API implementations. (`#200 <https://github.com/ros2/rmw_cyclonedds/issues/200>`_)
-* Finalize context iff shutdown. (`#196 <https://github.com/ros2/rmw_cyclonedds/issues/196>`_)
-* Contributors: Michel Hidalgo
+* rmw_destroy_node must remove node from graph cache (`#252 <https://github.com/ros2/rmw_cyclonedds/issues/252>`_)
+* Contributors: Erik Boasson
 
-0.8.1 (2020-06-22)
+0.7.3 (2020-07-21)
 ------------------
-* Handle RMW_DEFAULT_DOMAIN_ID. (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_)
-* Contributors: Michel Hidalgo
+* Fix lost service responses (`#183 <https://github.com/ros2/rmw_cyclonedds/issues/183>`_, `#74 <https://github.com/ros2/rmw_cyclonedds/issues/74>`_) (`#187 <https://github.com/ros2/rmw_cyclonedds/issues/187>`_) (`#209 <https://github.com/ros2/rmw_cyclonedds/issues/209>`_)
+* Contributors: Erik Boasson
 
-0.8.0 (2020-06-18)
+0.7.2 (2020-07-07)
 ------------------
-* Add support to message lost event (`#192 <https://github.com/ros2/rmw_cyclonedds/issues/192>`_)
-* Mitigate lost service responses discovery issue (`#187 <https://github.com/ros2/rmw_cyclonedds/issues/187>`_)
-* Contributors: Ivan Santiago Paunovic, eboasson
+* Handle RMW_DEFAULT_DOMAIN_ID (`#194 <https://github.com/ros2/rmw_cyclonedds/issues/194>`_) (`#199 <https://github.com/ros2/rmw_cyclonedds/issues/199>`_)
+* Contributors: Michel Hidalgo
 
 0.7.1 (2020-06-02)
 ------------------

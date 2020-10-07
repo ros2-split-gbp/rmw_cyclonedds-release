@@ -13,6 +13,8 @@
 // limitations under the License.
 #include "serdata.hpp"
 
+#include <rmw/allocators.h>
+
 #include <cstring>
 #include <memory>
 #include <regex>
@@ -20,15 +22,14 @@
 #include <string>
 #include <utility>
 
-#include "rmw/allocators.h"
 #include "Serialization.hpp"
 #include "TypeSupport2.hpp"
 #include "bytewise.hpp"
 #include "dds/ddsi/q_radmin.h"
 #include "rmw/error_handling.h"
-#include "MessageTypeSupport.hpp"
-#include "ServiceTypeSupport.hpp"
-#include "serdes.hpp"
+#include "rmw_cyclonedds_cpp/MessageTypeSupport.hpp"
+#include "rmw_cyclonedds_cpp/ServiceTypeSupport.hpp"
+#include "rmw_cyclonedds_cpp/serdes.hpp"
 
 /* Cyclone's nn_keyhash got renamed to ddsi_keyhash and shuffled around in the header
    files to avoid pulling in tons of things just for a definition of a keyhash.  This
@@ -42,10 +43,6 @@
 #define ddsi_keyhash nn_keyhash
 #endif
 
-using TypeSupport_c =
-  rmw_cyclonedds_cpp::TypeSupport<rosidl_typesupport_introspection_c__MessageMembers>;
-using TypeSupport_cpp =
-  rmw_cyclonedds_cpp::TypeSupport<rosidl_typesupport_introspection_cpp::MessageMembers>;
 using MessageTypeSupport_c =
   rmw_cyclonedds_cpp::MessageTypeSupport<rosidl_typesupport_introspection_c__MessageMembers>;
 using MessageTypeSupport_cpp =
@@ -204,7 +201,7 @@ static struct ddsi_serdata * serdata_rmw_from_sample(
     const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(topiccmn);
     auto d = std::make_unique<serdata_rmw>(topic, kind);
     if (kind != SDK_DATA) {
-      /* ROS 2 doesn't do keys, so SDK_KEY is trivial */
+      /* ROS2 doesn't do keys, so SDK_KEY is trivial */
     } else if (!topic->is_request_header) {
       size_t sz = topic->cdr_writer->get_serialized_size(sample);
       d->resize(sz);
@@ -278,7 +275,7 @@ static bool serdata_rmw_to_sample(
     assert(bufptr == NULL);
     assert(buflim == NULL);
     if (d->kind != SDK_DATA) {
-      /* ROS 2 doesn't do keys in a meaningful way yet */
+      /* ROS2 doesn't do keys in a meaningful way yet */
     } else if (!topic->is_request_header) {
       cycdeser sd(d->data(), d->size());
       if (using_introspection_c_typesupport(topic->type_support.typesupport_identifier_)) {
@@ -328,7 +325,7 @@ static bool serdata_rmw_topicless_to_sample(
   static_cast<void>(sample);
   static_cast<void>(bufptr);
   static_cast<void>(buflim);
-  /* ROS 2 doesn't do keys in a meaningful way yet */
+  /* ROS2 doesn't do keys in a meaningful way yet */
   return true;
 }
 
@@ -336,7 +333,7 @@ static bool serdata_rmw_eqkey(const struct ddsi_serdata * a, const struct ddsi_s
 {
   static_cast<void>(a);
   static_cast<void>(b);
-  /* ROS 2 doesn't do keys in a meaningful way yet */
+  /* ROS2 doesn't do keys in a meaningful way yet */
   return true;
 }
 
@@ -348,7 +345,7 @@ static size_t serdata_rmw_print(
     auto d = static_cast<const serdata_rmw *>(dcmn);
     const struct sertopic_rmw * topic = static_cast<const struct sertopic_rmw *>(tpcmn);
     if (d->kind != SDK_DATA) {
-      /* ROS 2 doesn't do keys in a meaningful way yet */
+      /* ROS2 doesn't do keys in a meaningful way yet */
       return static_cast<size_t>(snprintf(buf, bufsize, ":k:{}"));
     } else if (!topic->is_request_header) {
       cycprint sd(buf, bufsize, d->data(), d->size());
@@ -397,7 +394,7 @@ static void serdata_rmw_get_keyhash(
   const struct ddsi_serdata * d, struct ddsi_keyhash * buf,
   bool force_md5)
 {
-  /* ROS 2 doesn't do keys in a meaningful way yet, this is never called for topics without
+  /* ROS2 doesn't do keys in a meaningful way yet, this is never called for topics without
      key fields */
   static_cast<void>(d);
   static_cast<void>(force_md5);
@@ -435,15 +432,6 @@ static void sertopic_rmw_free(struct ddsi_sertopic * tpcmn)
 #if DDSI_SERTOPIC_HAS_TOPICKIND_NO_KEY
   ddsi_sertopic_fini(tpcmn);
 #endif
-  if (tp->type_support.type_support_) {
-    if (using_introspection_c_typesupport(tp->type_support.typesupport_identifier_)) {
-      delete static_cast<TypeSupport_c *>(tp->type_support.type_support_);
-    } else if (using_introspection_cpp_typesupport(tp->type_support.typesupport_identifier_)) {
-      delete static_cast<TypeSupport_cpp *>(tp->type_support.type_support_);
-    }
-    tp->type_support.type_support_ = NULL;
-  }
-
   delete tp;
 }
 
