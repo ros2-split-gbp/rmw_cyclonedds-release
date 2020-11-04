@@ -1,3 +1,28 @@
+## rmw_cyclonedds (eloquent) - 0.7.0-1
+
+The packages in the `rmw_cyclonedds` repository were released into the `eloquent` distro by running `/usr/bin/bloom-release --track eloquent --rosdistro eloquent rmw_cyclonedds --edit` on `Wed, 04 Nov 2020 01:51:23 -0000`
+
+These packages were released:
+- `cyclonedds_cmake_module`
+- `rmw_cyclonedds_cpp`
+
+Version of package(s) in repository `rmw_cyclonedds`:
+
+- upstream repository: https://github.com/ros2/rmw_cyclonedds.git
+- release repository: https://github.com/ros2-gbp/rmw_cyclonedds-release.git
+- rosdistro version: `0.5.1-1`
+- old version: `0.5.1-1`
+- new version: `0.7.0-1`
+
+Versions of tools used:
+
+- bloom version: `0.10.0`
+- catkin_pkg version: `0.4.23`
+- rosdep version: `0.19.0`
+- rosdistro version: `0.8.3`
+- vcstools version: `0.1.42`
+
+
 ## rmw_cyclonedds (foxy) - 0.7.5-1
 
 The packages in the `rmw_cyclonedds` repository were released into the `foxy` distro by running `/usr/bin/bloom-release -e --rosdistro foxy --track foxy rmw_cyclonedds` on `Thu, 15 Oct 2020 13:47:47 -0000`
