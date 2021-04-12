@@ -1,4 +1,4 @@
-From d8d6fca2a11bff0a4b676482428a026b250555b9 Mon Sep 17 00:00:00 2001
+From c725bd7895c6b190f74d28822b1672764f59bef1 Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Tue, 5 May 2020 18:19:45 -0700
 Subject: [PATCH] Tell shlibdeps where to find cyclonedds libraries
@@ -25,5 +25,5 @@ index 5a04067..81858a8 100755
  override_dh_auto_install:
  	# In case we're installing to a non-standard location, look for a setup.sh
 -- 
-2.31.0
+2.25.1
 
