@@ -1,3 +1,26 @@
+## rmw_cyclonedds (galactic) - 0.22.2-1
+
+The packages in the `rmw_cyclonedds` repository were released into the `galactic` distro by running `/usr/bin/bloom-release --rosdistro galactic --track galactic rmw_cyclonedds` on `Mon, 26 Apr 2021 20:45:42 -0000`
+
+The `rmw_cyclonedds_cpp` package was released.
+
+Version of package(s) in repository `rmw_cyclonedds`:
+
+- upstream repository: https://github.com/ros2/rmw_cyclonedds.git
+- release repository: https://github.com/ros2-gbp/rmw_cyclonedds-release.git
+- rosdistro version: `0.22.1-2`
+- old version: `0.22.1-2`
+- new version: `0.22.2-1`
+
+Versions of tools used:
+
+- bloom version: `0.10.7`
+- catkin_pkg version: `0.4.23`
+- rosdep version: `0.20.1`
+- rosdistro version: `0.8.3`
+- vcstools version: `0.1.42`
+
+
 ## rmw_cyclonedds (rolling) - 0.22.2-1
 
 The packages in the `rmw_cyclonedds` repository were released into the `rolling` distro by running `/usr/bin/bloom-release --rosdistro rolling --track rolling rmw_cyclonedds` on `Mon, 26 Apr 2021 20:39:21 -0000`
