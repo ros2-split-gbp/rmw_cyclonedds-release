@@ -32,9 +32,9 @@
 #include <regex>
 #include <limits>
 
-#include "rcutils/env.h"
 #include "rcutils/filesystem.h"
 #include "rcutils/format_string.h"
+#include "rcutils/get_env.h"
 #include "rcutils/logging_macros.h"
 #include "rcutils/strdup.h"
 
@@ -1536,9 +1536,6 @@ extern "C" rmw_ret_t rmw_deserialize(
   } catch (rmw_cyclonedds_cpp::Exception & e) {
     RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("rmw_serialize: %s", e.what());
     ok = false;
-  } catch (std::runtime_error & e) {
-    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("rmw_serialize: %s", e.what());
-    ok = false;
   }
 
   return ok ? RMW_RET_OK : RMW_RET_ERROR;
@@ -2336,39 +2333,6 @@ rmw_ret_t rmw_publisher_assert_liveliness(const rmw_publisher_t * publisher)
     return RMW_RET_ERROR;
   }
   return RMW_RET_OK;
-}
-
-rmw_ret_t rmw_publisher_wait_for_all_acked(
-  const rmw_publisher_t * publisher,
-  rmw_time_t wait_timeout)
-{
-  RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
-  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
-    publisher,
-    publisher->implementation_identifier,
-    eclipse_cyclonedds_identifier,
-    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-
-  auto pub = static_cast<CddsPublisher *>(publisher->data);
-  if (pub == nullptr) {
-    RMW_SET_ERROR_MSG("The publisher is not a valid publisher.");
-    return RMW_RET_INVALID_ARGUMENT;
-  }
-
-  dds_duration_t timeout = rmw_duration_to_dds(wait_timeout);
-  switch (dds_wait_for_acks(pub->enth, timeout)) {
-    case DDS_RETCODE_OK:
-      return RMW_RET_OK;
-    case DDS_RETCODE_BAD_PARAMETER:
-      RMW_SET_ERROR_MSG("The publisher is not a valid publisher.");
-      return RMW_RET_INVALID_ARGUMENT;
-    case DDS_RETCODE_TIMEOUT:
-      return RMW_RET_TIMEOUT;
-    case DDS_RETCODE_UNSUPPORTED:
-      return RMW_RET_UNSUPPORTED;
-    default:
-      return RMW_RET_ERROR;
-  }
 }
 
 rmw_ret_t rmw_publisher_get_actual_qos(const rmw_publisher_t * publisher, rmw_qos_profile_t * qos)
