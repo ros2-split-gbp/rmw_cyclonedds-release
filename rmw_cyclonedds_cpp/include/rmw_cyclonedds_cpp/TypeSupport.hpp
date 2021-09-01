@@ -13,8 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef TYPESUPPORT_HPP_
-#define TYPESUPPORT_HPP_
+#ifndef RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
+#define RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
+
+#include <rosidl_runtime_c/string.h>
+#include <rosidl_runtime_c/string_functions.h>
+#include <rosidl_runtime_c/u16string_functions.h>
 
 #include <cassert>
 #include <string>
@@ -22,19 +26,17 @@
 
 #include "rcutils/logging_macros.h"
 
-#include "rosidl_runtime_c/string.h"
-#include "rosidl_runtime_c/string_functions.h"
-#include "rosidl_runtime_c/u16string_functions.h"
-
 #include "rosidl_typesupport_introspection_cpp/field_types.hpp"
 #include "rosidl_typesupport_introspection_cpp/identifier.hpp"
 #include "rosidl_typesupport_introspection_cpp/message_introspection.hpp"
 #include "rosidl_typesupport_introspection_cpp/service_introspection.hpp"
+#include "rosidl_typesupport_introspection_cpp/visibility_control.h"
 
 #include "rosidl_typesupport_introspection_c/field_types.h"
 #include "rosidl_typesupport_introspection_c/identifier.h"
 #include "rosidl_typesupport_introspection_c/message_introspection.h"
 #include "rosidl_typesupport_introspection_c/service_introspection.h"
+#include "rosidl_typesupport_introspection_c/visibility_control.h"
 
 #include "serdes.hpp"
 
@@ -76,7 +78,7 @@ struct StringHelper<rosidl_typesupport_introspection_c__MessageMembers>
     return std::string(data.data);
   }
 
-  static void assign(cycdeser & deser, void * field)
+  static void assign(cycdeser & deser, void * field, bool)
   {
     std::string str;
     deser >> str;
@@ -96,9 +98,12 @@ struct StringHelper<rosidl_typesupport_introspection_cpp::MessageMembers>
     return *(static_cast<std::string *>(data));
   }
 
-  static void assign(cycdeser & deser, void * field)
+  static void assign(cycdeser & deser, void * field, bool call_new)
   {
     std::string & str = *(std::string *)field;
+    if (call_new) {
+      new(&str) std::string;
+    }
     deser >> str;
   }
 };
@@ -114,8 +119,6 @@ public:
     cycprint & deser,
     std::function<void(cycprint &)> prefix = nullptr);
   std::string getName();
-  bool is_type_self_contained();
-  virtual ~TypeSupport() = default;
 
 protected:
   TypeSupport();
@@ -127,25 +130,14 @@ protected:
 
 private:
   bool deserializeROSmessage(
-    cycdeser & deser, const MembersType * members, void * ros_message);
+    cycdeser & deser, const MembersType * members, void * ros_message,
+    bool call_new);
   bool printROSmessage(
     cycprint & deser, const MembersType * members);
-  bool is_type_self_contained(const MembersType * members);
 };
-
-size_t get_message_size(
-  const rosidl_message_type_support_t * type_supports);
-
-void init_message(
-  const rosidl_message_type_support_t * type_supports,
-  void * message);
-
-void fini_message(
-  const rosidl_message_type_support_t * type_supports,
-  void * message);
 
 }  // namespace rmw_cyclonedds_cpp
 
 #include "TypeSupport_impl.hpp"
 
-#endif  // TYPESUPPORT_HPP_
+#endif  // RMW_CYCLONEDDS_CPP__TYPESUPPORT_HPP_
