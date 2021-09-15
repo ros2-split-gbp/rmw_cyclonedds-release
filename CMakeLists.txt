@@ -29,6 +29,7 @@ find_package(ament_cmake_ros REQUIRED)
 
 find_package(rcutils REQUIRED)
 find_package(rcpputils REQUIRED)
+find_package(tracetools REQUIRED)
 
 #find_package(cyclonedds_cmake_module REQUIRED)
 find_package(CycloneDDS QUIET CONFIG)
@@ -68,6 +69,17 @@ add_library(rmw_cyclonedds_cpp
 target_link_libraries(rmw_cyclonedds_cpp
   CycloneDDS::ddsc
 )
+if(CMAKE_GENERATOR_PLATFORM)
+  set(TARGET_ARCH "${CMAKE_GENERATOR_PLATFORM}")
+else()
+  set(TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+if(CMAKE_COMPILER_IS_GNUCXX AND TARGET_ARCH MATCHES "^(riscv|RISCV)64$")
+  # using GCC, libatomic is not automatically linked for RISC-V
+  target_link_libraries(rmw_cyclonedds_cpp -latomic)
+endif()
+
 
 ament_target_dependencies(rmw_cyclonedds_cpp
   "rcutils"
@@ -77,6 +89,7 @@ ament_target_dependencies(rmw_cyclonedds_cpp
   "rmw"
   "rmw_dds_common"
   "rosidl_runtime_c"
+  "tracetools"
 )
 
 configure_rmw_library(rmw_cyclonedds_cpp)
