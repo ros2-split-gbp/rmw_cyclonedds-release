@@ -71,8 +71,11 @@
 #include "rmw_dds_common/graph_cache.hpp"
 #include "rmw_dds_common/msg/participant_entities_info.hpp"
 #include "rmw_dds_common/qos.hpp"
+#include "rmw_dds_common/security.hpp"
 
 #include "rosidl_typesupport_cpp/message_type_support.hpp"
+
+#include "tracetools/tracetools.h"
 
 #include "namespace_prefix.hpp"
 
@@ -223,18 +226,6 @@ struct CddsEntity
   dds_entity_t enth;
 };
 
-#if RMW_SUPPORT_SECURITY
-struct dds_security_files_t
-{
-  char * identity_ca_cert = nullptr;
-  char * cert = nullptr;
-  char * key = nullptr;
-  char * permissions_ca_cert = nullptr;
-  char * governance_p7s = nullptr;
-  char * permissions_p7s = nullptr;
-};
-#endif
-
 struct CddsDomain
 {
   /* This RMW implementation currently implements localhost-only by explicitly creating
@@ -276,7 +267,8 @@ struct CddsDomain
   {}
 };
 
-struct rmw_context_impl_t
+// Definition of struct rmw_context_impl_s as declared in rmw/init.h
+struct rmw_context_impl_s
 {
   rmw_dds_common::Context common;
   dds_domainid_t domain_id;
@@ -303,7 +295,7 @@ struct rmw_context_impl_t
      (protected by initialization_mutex) */
   uint32_t client_service_id;
 
-  rmw_context_impl_t()
+  rmw_context_impl_s()
   : common(), domain_id(UINT32_MAX), ppant(0), client_service_id(0)
   {
     /* destructor relies on these being initialized properly */
@@ -322,7 +314,7 @@ struct rmw_context_impl_t
   rmw_ret_t
   fini();
 
-  ~rmw_context_impl_t()
+  ~rmw_context_impl_s()
   {
     if (0u != this->node_count) {
       RCUTILS_SAFE_FWRITE_TO_STDERR(
@@ -844,76 +836,6 @@ check_destroy_domain(dds_domainid_t domain_id)
   }
 }
 
-#if RMW_SUPPORT_SECURITY
-/*  Returns the full URI of a security file properly formatted for DDS  */
-bool get_security_file_URI(
-  char ** security_file, const char * security_filename, const char * node_secure_root,
-  const rcutils_allocator_t allocator)
-{
-  *security_file = nullptr;
-  char * file_path = rcutils_join_path(node_secure_root, security_filename, allocator);
-  if (file_path != nullptr) {
-    if (rcutils_is_readable(file_path)) {
-      /*  Cyclone also supports a "data:" URI  */
-      *security_file = rcutils_format_string(allocator, "file:%s", file_path);
-      allocator.deallocate(file_path, allocator.state);
-    } else {
-      RCUTILS_LOG_INFO_NAMED(
-        "rmw_cyclonedds_cpp", "get_security_file_URI: %s not found", file_path);
-      allocator.deallocate(file_path, allocator.state);
-    }
-  }
-  return *security_file != nullptr;
-}
-
-bool get_security_file_URIs(
-  const rmw_security_options_t * security_options,
-  dds_security_files_t & dds_security_files, rcutils_allocator_t allocator)
-{
-  bool ret = false;
-
-  if (security_options->security_root_path != nullptr) {
-    ret = (
-      get_security_file_URI(
-        &dds_security_files.identity_ca_cert, "identity_ca.cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.cert, "cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.key, "key.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.permissions_ca_cert, "permissions_ca.cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.governance_p7s, "governance.p7s",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.permissions_p7s, "permissions.p7s",
-        security_options->security_root_path, allocator));
-  }
-  return ret;
-}
-
-void finalize_security_file_URIs(
-  dds_security_files_t dds_security_files, const rcutils_allocator_t allocator)
-{
-  allocator.deallocate(dds_security_files.identity_ca_cert, allocator.state);
-  dds_security_files.identity_ca_cert = nullptr;
-  allocator.deallocate(dds_security_files.cert, allocator.state);
-  dds_security_files.cert = nullptr;
-  allocator.deallocate(dds_security_files.key, allocator.state);
-  dds_security_files.key = nullptr;
-  allocator.deallocate(dds_security_files.permissions_ca_cert, allocator.state);
-  dds_security_files.permissions_ca_cert = nullptr;
-  allocator.deallocate(dds_security_files.governance_p7s, allocator.state);
-  dds_security_files.governance_p7s = nullptr;
-  allocator.deallocate(dds_security_files.permissions_p7s, allocator.state);
-  dds_security_files.permissions_p7s = nullptr;
-}
-#endif  /* RMW_SUPPORT_SECURITY */
-
 /* Attempt to set all the qos properties needed to enable DDS security */
 static
 rmw_ret_t configure_qos_for_security(
@@ -921,34 +843,43 @@ rmw_ret_t configure_qos_for_security(
   const rmw_security_options_t * security_options)
 {
 #if RMW_SUPPORT_SECURITY
-  rmw_ret_t ret = RMW_RET_UNSUPPORTED;
-  dds_security_files_t dds_security_files;
-  rcutils_allocator_t allocator = rcutils_get_default_allocator();
-
-  if (get_security_file_URIs(security_options, dds_security_files, allocator)) {
-    dds_qset_prop(qos, "dds.sec.auth.identity_ca", dds_security_files.identity_ca_cert);
-    dds_qset_prop(qos, "dds.sec.auth.identity_certificate", dds_security_files.cert);
-    dds_qset_prop(qos, "dds.sec.auth.private_key", dds_security_files.key);
-    dds_qset_prop(qos, "dds.sec.access.permissions_ca", dds_security_files.permissions_ca_cert);
-    dds_qset_prop(qos, "dds.sec.access.governance", dds_security_files.governance_p7s);
-    dds_qset_prop(qos, "dds.sec.access.permissions", dds_security_files.permissions_p7s);
-
-    dds_qset_prop(qos, "dds.sec.auth.library.path", "dds_security_auth");
-    dds_qset_prop(qos, "dds.sec.auth.library.init", "init_authentication");
-    dds_qset_prop(qos, "dds.sec.auth.library.finalize", "finalize_authentication");
-
-    dds_qset_prop(qos, "dds.sec.crypto.library.path", "dds_security_crypto");
-    dds_qset_prop(qos, "dds.sec.crypto.library.init", "init_crypto");
-    dds_qset_prop(qos, "dds.sec.crypto.library.finalize", "finalize_crypto");
-
-    dds_qset_prop(qos, "dds.sec.access.library.path", "dds_security_ac");
-    dds_qset_prop(qos, "dds.sec.access.library.init", "init_access_control");
-    dds_qset_prop(qos, "dds.sec.access.library.finalize", "finalize_access_control");
-
-    ret = RMW_RET_OK;
+  std::unordered_map<std::string, std::string> security_files;
+  if (security_options->security_root_path == nullptr) {
+    return RMW_RET_UNSUPPORTED;
   }
-  finalize_security_file_URIs(dds_security_files, allocator);
-  return ret;
+
+  if (!rmw_dds_common::get_security_files(
+      "file:", security_options->security_root_path, security_files))
+  {
+    RCUTILS_LOG_INFO_NAMED(
+      "rmw_cyclonedds_cpp", "could not find all security files");
+    return RMW_RET_UNSUPPORTED;
+  }
+
+  dds_qset_prop(qos, "dds.sec.auth.identity_ca", security_files["IDENTITY_CA"].c_str());
+  dds_qset_prop(qos, "dds.sec.auth.identity_certificate", security_files["CERTIFICATE"].c_str());
+  dds_qset_prop(qos, "dds.sec.auth.private_key", security_files["PRIVATE_KEY"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.permissions_ca", security_files["PERMISSIONS_CA"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.governance", security_files["GOVERNANCE"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.permissions", security_files["PERMISSIONS"].c_str());
+
+  dds_qset_prop(qos, "dds.sec.auth.library.path", "dds_security_auth");
+  dds_qset_prop(qos, "dds.sec.auth.library.init", "init_authentication");
+  dds_qset_prop(qos, "dds.sec.auth.library.finalize", "finalize_authentication");
+
+  dds_qset_prop(qos, "dds.sec.crypto.library.path", "dds_security_crypto");
+  dds_qset_prop(qos, "dds.sec.crypto.library.init", "init_crypto");
+  dds_qset_prop(qos, "dds.sec.crypto.library.finalize", "finalize_crypto");
+
+  dds_qset_prop(qos, "dds.sec.access.library.path", "dds_security_ac");
+  dds_qset_prop(qos, "dds.sec.access.library.init", "init_access_control");
+  dds_qset_prop(qos, "dds.sec.access.library.finalize", "finalize_access_control");
+
+  if (security_files.count("CRL") > 0) {
+    dds_qset_prop(qos, "org.eclipse.cyclonedds.sec.auth.crl", security_files["CRL"].c_str());
+  }
+
+  return RMW_RET_OK;
 #else
   (void) qos;
   if (security_options->enforce_security == RMW_SECURITY_ENFORCEMENT_ENFORCE) {
@@ -962,7 +893,7 @@ rmw_ret_t configure_qos_for_security(
 }
 
 rmw_ret_t
-rmw_context_impl_t::init(rmw_init_options_t * options, size_t domain_id)
+rmw_context_impl_s::init(rmw_init_options_t * options, size_t domain_id)
 {
   std::lock_guard<std::mutex> guard(initialization_mutex);
   if (0u != this->node_count) {
@@ -1145,7 +1076,7 @@ rmw_context_impl_t::clean_up()
 }
 
 rmw_ret_t
-rmw_context_impl_t::fini()
+rmw_context_impl_s::fini()
 {
   std::lock_guard<std::mutex> guard(initialization_mutex);
   if (0u != --this->node_count) {
@@ -1619,6 +1550,7 @@ extern "C" rmw_ret_t rmw_publish(
     return RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   assert(pub);
+  TRACEPOINT(rmw_publish, ros_message);
   if (dds_write(pub->enth, ros_message) >= 0) {
     return RMW_RET_OK;
   } else {
@@ -2105,7 +2037,7 @@ static CddsPublisher * create_cdds_publisher(
   pub->type_supports = *type_supports;
   pub->is_loaning_available =
 #ifdef DDS_HAS_SHM
-    is_fixed_type && is_loan_available(pub->enth);
+    is_fixed_type && dds_is_loan_available(pub->enth);
 #else
     false;
 #endif  // DDS_HAS_SHM
@@ -2262,6 +2194,7 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
   }
 
   cleanup_publisher.cancel();
+  TRACEPOINT(rmw_publisher_init, static_cast<const void *>(pub), cddspub->gid.data);
   return pub;
 }
 
@@ -2603,7 +2536,7 @@ static CddsSubscription * create_cdds_subscription(
   sub->type_supports = *type_support;
   sub->is_loaning_available =
 #ifdef DDS_HAS_SHM
-    is_fixed_type && is_loan_available(sub->enth);
+    is_fixed_type && dds_is_loan_available(sub->enth);
 #else
     false;
 #endif  // DDS_HAS_SHM
@@ -2767,6 +2700,7 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
   }
 
   cleanup_subscription.cancel();
+  TRACEPOINT(rmw_subscription_init, static_cast<const void *>(sub), cddssub->gid.data);
   return sub;
 }
 
@@ -2922,10 +2856,17 @@ static rmw_ret_t rmw_take_int(
         fprintf(stderr, "** sample in history for %.fms\n", static_cast<double>(dt) / 1e6);
       }
 #endif
-      return RMW_RET_OK;
+      goto take_done;
     }
   }
   *taken = false;
+take_done:
+  TRACEPOINT(
+    rmw_take,
+    static_cast<const void *>(subscription),
+    static_cast<const void *>(ros_message),
+    (message_info ? message_info->source_timestamp : 0LL),
+    *taken);
   return RMW_RET_OK;
 }
 
