@@ -29,6 +29,7 @@ find_package(ament_cmake_ros REQUIRED)
 
 find_package(rcutils REQUIRED)
 find_package(rcpputils REQUIRED)
+find_package(tracetools REQUIRED)
 
 #find_package(cyclonedds_cmake_module REQUIRED)
 find_package(CycloneDDS QUIET CONFIG)
@@ -53,6 +54,7 @@ ament_export_dependencies(rosidl_typesupport_introspection_c)
 ament_export_dependencies(rosidl_typesupport_introspection_cpp)
 
 add_library(rmw_cyclonedds_cpp
+  src/rmw_get_network_flow_endpoints.cpp
   src/rmw_node.cpp
   src/serdata.cpp
   src/serdes.cpp
@@ -61,12 +63,8 @@ add_library(rmw_cyclonedds_cpp
   src/demangle.cpp
   src/deserialization_exception.cpp
   src/Serialization.cpp
-  src/TypeSupport2.cpp)
-
-target_include_directories(rmw_cyclonedds_cpp PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+  src/TypeSupport2.cpp
+  src/TypeSupport.cpp)
 
 target_link_libraries(rmw_cyclonedds_cpp
   CycloneDDS::ddsc
@@ -91,6 +89,7 @@ ament_target_dependencies(rmw_cyclonedds_cpp
   "rmw"
   "rmw_dds_common"
   "rosidl_runtime_c"
+  "tracetools"
 )
 
 configure_rmw_library(rmw_cyclonedds_cpp)
@@ -102,12 +101,6 @@ target_compile_definitions(${PROJECT_NAME}
     RMW_VERSION_PATCH=${rmw_VERSION_PATCH}
 )
 
-# Causes the visibility macros to use dllexport rather than dllimport,
-# which is appropriate when building the dll but not consuming it.
-target_compile_definitions(${PROJECT_NAME}
-  PRIVATE "RMW_CYCLONEDDS_CPP_BUILDING_LIBRARY")
-
-ament_export_include_directories(include)
 ament_export_libraries(rmw_cyclonedds_cpp)
 
 register_rmw_implementation(
@@ -120,11 +113,6 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
-
-install(
-  DIRECTORY include/
-  DESTINATION include
-)
 
 install(
   TARGETS rmw_cyclonedds_cpp
