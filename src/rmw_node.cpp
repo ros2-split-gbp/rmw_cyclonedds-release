@@ -1117,8 +1117,9 @@ static void * init_and_alloc_sample(
   auto ice_hdr = static_cast<iceoryx_header_t *>(chunk_ptr);
   ice_hdr->data_size = sample_size;
   auto ptr = SHIFT_PAST_ICEORYX_HEADER(chunk_ptr);
-  // initialize the memory for message
-  rmw_cyclonedds_cpp::init_message(&entity->type_supports, ptr);
+  // Don't initialize the message memory, as this allocated memory will anyways be filled by the
+  // user and initializing the memory here just creates undesired performance hit with the
+  // zero-copy path
   return ptr;
 }
 
@@ -4306,10 +4307,6 @@ static rmw_ret_t rmw_init_cs(
   if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
     goto fail_qos;
   }
-  dds_reset_qos(qos);
-
-  dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
-  dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, DDS_LENGTH_UNLIMITED);
 
   // store a unique identifier for this client/service in the user
   // data of the reader and writer so that we can always determine
