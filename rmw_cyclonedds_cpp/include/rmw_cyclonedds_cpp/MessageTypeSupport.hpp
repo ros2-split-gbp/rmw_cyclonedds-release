@@ -12,39 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MESSAGETYPESUPPORT_IMPL_HPP_
-#define MESSAGETYPESUPPORT_IMPL_HPP_
+#ifndef RMW_CYCLONEDDS_CPP__MESSAGETYPESUPPORT_HPP_
+#define RMW_CYCLONEDDS_CPP__MESSAGETYPESUPPORT_HPP_
 
 #include <cassert>
 #include <memory>
-#include <regex>
-#include <sstream>
-#include <string>
 
-#include "MessageTypeSupport.hpp"
+#include "TypeSupport.hpp"
+#include "rosidl_typesupport_introspection_cpp/message_introspection.hpp"
 #include "rosidl_typesupport_introspection_cpp/field_types.hpp"
 
 namespace rmw_cyclonedds_cpp
 {
 
 template<typename MembersType>
-MessageTypeSupport<MembersType>::MessageTypeSupport(const MembersType * members)
+class MessageTypeSupport : public TypeSupport<MembersType>
 {
-  assert(members);
-  this->members_ = members;
-
-  std::ostringstream ss;
-  std::string message_namespace(this->members_->message_namespace_);
-  std::string message_name(this->members_->message_name_);
-  if (!message_namespace.empty()) {
-    // Find and replace C namespace separator with C++, in case this is using C typesupport
-    message_namespace = std::regex_replace(message_namespace, std::regex("__"), "::");
-    ss << message_namespace << "::";
-  }
-  ss << "dds_::" << message_name << "_";
-  this->setName(ss.str().c_str());
-}
+public:
+  explicit MessageTypeSupport(const MembersType * members);
+};
 
 }  // namespace rmw_cyclonedds_cpp
 
-#endif  // MESSAGETYPESUPPORT_IMPL_HPP_
+#include "MessageTypeSupport_impl.hpp"
+
+#endif  // RMW_CYCLONEDDS_CPP__MESSAGETYPESUPPORT_HPP_
