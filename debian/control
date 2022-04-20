@@ -1,0 +1,12 @@
+Source: ros-humble-rmw-cyclonedds-cpp
+Section: misc
+Priority: optional
+Maintainer: Erik Boasson <erik.boasson@adlinktech.com>
+Build-Depends: debhelper (>= 9.0.0), ros-humble-ament-cmake-ros, ros-humble-ament-lint-auto <!nocheck>, ros-humble-ament-lint-common <!nocheck>, ros-humble-cyclonedds, ros-humble-iceoryx-binding-c, ros-humble-rcpputils, ros-humble-rcutils, ros-humble-rmw, ros-humble-rmw-dds-common, ros-humble-rosidl-runtime-c, ros-humble-rosidl-typesupport-introspection-c, ros-humble-rosidl-typesupport-introspection-cpp, ros-humble-tracetools, ros-humble-ros-workspace
+Homepage: 
+Standards-Version: 3.9.2
+
+Package: ros-humble-rmw-cyclonedds-cpp
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-humble-cyclonedds, ros-humble-iceoryx-binding-c, ros-humble-rcpputils, ros-humble-rcutils, ros-humble-rmw, ros-humble-rmw-dds-common, ros-humble-rosidl-runtime-c, ros-humble-rosidl-typesupport-introspection-c, ros-humble-rosidl-typesupport-introspection-cpp, ros-humble-tracetools, ros-humble-ros-workspace
+Description: Implement the ROS middleware interface using Eclipse CycloneDDS in C++.
