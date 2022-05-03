@@ -143,9 +143,16 @@ static void serialize_into_serdata_rmw_on_demand(serdata_rmw * d)
   {
     std::lock_guard<std::mutex> lock(type->serialize_lock);
     if (d->iox_chunk && d->data() == nullptr) {
-      serialize_into_serdata_rmw(
-        const_cast<serdata_rmw *>(d),
-        SHIFT_PAST_ICEORYX_HEADER(d->iox_chunk));
+      auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
+      // if the iox chunk has the data in serialized form
+      if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
+        d->resize(iox_header->data_size);
+        memcpy(d->data(), d->iox_chunk, iox_header->data_size);
+      } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
+        serialize_into_serdata_rmw(const_cast<serdata_rmw *>(d), d->iox_chunk);
+      } else {
+        RMW_SET_ERROR_MSG("Received iox chunk is uninitialized");
+      }
     }
   }
 #endif
@@ -164,7 +171,14 @@ static uint32_t serdata_rmw_size(const struct ddsi_serdata * dcmn)
 
 static void serdata_rmw_free(struct ddsi_serdata * dcmn)
 {
-  auto * d = static_cast<const serdata_rmw *>(dcmn);
+  auto * d = static_cast<serdata_rmw *>(dcmn);
+
+#ifdef DDS_HAS_SHM
+  if (d->iox_chunk && d->iox_subscriber) {
+    free_iox_chunk(static_cast<iox_sub_t *>(d->iox_subscriber), &d->iox_chunk);
+    d->iox_chunk = nullptr;
+  }
+#endif
   delete d;
 }
 
@@ -173,28 +187,33 @@ static struct ddsi_serdata * serdata_rmw_from_ser(
   enum ddsi_serdata_kind kind,
   const struct nn_rdata * fragchain, size_t size)
 {
-  auto d = std::make_unique<serdata_rmw>(type, kind);
-  uint32_t off = 0;
-  assert(fragchain->min == 0);
-  assert(fragchain->maxp1 >= off);    /* CDR header must be in first fragment */
-  d->resize(size);
+  try {
+    auto d = std::make_unique<serdata_rmw>(type, kind);
+    uint32_t off = 0;
+    assert(fragchain->min == 0);
+    assert(fragchain->maxp1 >= off);    /* CDR header must be in first fragment */
+    d->resize(size);
 
-  auto cursor = d->data();
-  while (fragchain) {
-    if (fragchain->maxp1 > off) {
-      /* only copy if this fragment adds data */
-      const unsigned char * payload =
-        NN_RMSG_PAYLOADOFF(fragchain->rmsg, NN_RDATA_PAYLOAD_OFF(fragchain));
-      auto src = payload + off - fragchain->min;
-      auto n_bytes = fragchain->maxp1 - off;
-      memcpy(cursor, src, n_bytes);
-      cursor = byte_offset(cursor, n_bytes);
-      off = fragchain->maxp1;
-      assert(off <= size);
+    auto cursor = d->data();
+    while (fragchain) {
+      if (fragchain->maxp1 > off) {
+        /* only copy if this fragment adds data */
+        const unsigned char * payload =
+          NN_RMSG_PAYLOADOFF(fragchain->rmsg, NN_RDATA_PAYLOAD_OFF(fragchain));
+        auto src = payload + off - fragchain->min;
+        auto n_bytes = fragchain->maxp1 - off;
+        memcpy(cursor, src, n_bytes);
+        cursor = byte_offset(cursor, n_bytes);
+        off = fragchain->maxp1;
+        assert(off <= size);
+      }
+      fragchain = fragchain->nextfrag;
     }
-    fragchain = fragchain->nextfrag;
+    return d.release();
+  } catch (std::exception & e) {
+    RMW_SET_ERROR_MSG(e.what());
+    return nullptr;
   }
-  return d.release();
 }
 
 static struct ddsi_serdata * serdata_rmw_from_ser_iov(
@@ -203,15 +222,20 @@ static struct ddsi_serdata * serdata_rmw_from_ser_iov(
   ddsrt_msg_iovlen_t niov, const ddsrt_iovec_t * iov,
   size_t size)
 {
-  auto d = std::make_unique<serdata_rmw>(type, kind);
-  d->resize(size);
+  try {
+    auto d = std::make_unique<serdata_rmw>(type, kind);
+    d->resize(size);
 
-  auto cursor = d->data();
-  for (ddsrt_msg_iovlen_t i = 0; i < niov; i++) {
-    memcpy(cursor, iov[i].iov_base, iov[i].iov_len);
-    cursor = byte_offset(cursor, iov[i].iov_len);
+    auto cursor = d->data();
+    for (ddsrt_msg_iovlen_t i = 0; i < niov; i++) {
+      memcpy(cursor, iov[i].iov_base, iov[i].iov_len);
+      cursor = byte_offset(cursor, iov[i].iov_len);
+    }
+    return d.release();
+  } catch (std::exception & e) {
+    RMW_SET_ERROR_MSG(e.what());
+    return nullptr;
   }
-  return d.release();
 }
 
 static struct ddsi_serdata * serdata_rmw_from_keyhash(
@@ -244,11 +268,16 @@ static struct ddsi_serdata * serdata_rmw_from_iox(
   const struct ddsi_sertype * typecmn,
   enum  ddsi_serdata_kind kind, void * sub, void * iox_buffer)
 {
-  static_cast<void>(sub);  // unused
-  const struct sertype_rmw * type = static_cast<const struct sertype_rmw *>(typecmn);
-  auto d = std::make_unique<serdata_rmw>(type, kind);
-  d->iox_chunk = iox_buffer;
-  return d.release();
+  try {
+    const struct sertype_rmw * type = static_cast<const struct sertype_rmw *>(typecmn);
+    auto d = std::make_unique<serdata_rmw>(type, kind);
+    d->iox_chunk = iox_buffer;
+    d->iox_subscriber = sub;
+    return d.release();
+  } catch (std::exception & e) {
+    RMW_SET_ERROR_MSG(e.what());
+    return nullptr;
+  }
 }
 #endif  // DDS_HAS_SHM
 
@@ -339,6 +368,7 @@ static bool serdata_rmw_to_sample(
         probably incompatible. */
       cdds_request_wrapper_t * const wrap = static_cast<cdds_request_wrapper_t *>(sample);
       auto prefix = [wrap](cycdeser & ser) {ser >> wrap->header.guid; ser >> wrap->header.seq;};
+      serialize_into_serdata_rmw_on_demand(const_cast<serdata_rmw *>(d));
       cycdeser sd(d->data(), d->size());
       if (using_introspection_c_typesupport(type->type_support.typesupport_identifier_)) {
         auto typed_typesupport =
@@ -544,11 +574,58 @@ bool sertype_rmw_equal(
 uint32_t sertype_rmw_hash(const struct ddsi_sertype * tpcmn)
 {
   const struct sertype_rmw * tp = static_cast<const struct sertype_rmw *>(tpcmn);
-  uint32_t h2 = static_cast<uint32_t>(std::hash<bool>{} (tp->is_request_header));
+  uint32_t h2 = static_cast<uint32_t>(std::hash<bool>{}(tp->is_request_header));
   uint32_t h1 =
-    static_cast<uint32_t>(std::hash<std::string>{} (std::string(
-      tp->type_support.typesupport_identifier_)));
+    static_cast<uint32_t>(std::hash<std::string>{}(
+      std::string(
+        tp->type_support.typesupport_identifier_)));
   return h1 ^ h2;
+}
+
+size_t sertype_get_serialized_size(const struct ddsi_sertype * d, const void * sample)
+{
+  const struct sertype_rmw * type = static_cast<const struct sertype_rmw *>(d);
+  size_t serialized_size = 0;
+  try {
+    // ROS 2 doesn't support keys yet, so only data is handled
+    if (!type->is_request_header) {
+      serialized_size = type->cdr_writer->get_serialized_size(sample);
+    } else {
+      // inject the service invocation header data into the CDR stream
+      auto wrap = *static_cast<const cdds_request_wrapper_t *>(sample);
+      serialized_size = type->cdr_writer->get_serialized_size(wrap);
+    }
+  } catch (std::exception & e) {
+    RMW_SET_ERROR_MSG(e.what());
+  }
+
+  return serialized_size;
+}
+
+bool sertype_serialize_into(
+  const struct ddsi_sertype * d,
+  const void * sample,
+  void * dst_buffer,
+  size_t dst_size)
+{
+  const struct sertype_rmw * type = static_cast<const struct sertype_rmw *>(d);
+  try {
+    // ignore destination size (assuming that the destination buffer is resized before correctly)
+    static_cast<void>(dst_size);
+    // ROS 2 doesn't support keys, so its all data (?)
+    if (!type->is_request_header) {
+      type->cdr_writer->serialize(dst_buffer, sample);
+    } else {
+      /* inject the service invocation header data into the CDR stream --
+       * I haven't checked how it is done in the official RMW implementations, so it is
+       * probably incompatible. */
+      auto wrap = *static_cast<const cdds_request_wrapper_t *>(sample);
+      type->cdr_writer->serialize(dst_buffer, wrap);
+    }
+  } catch (std::exception & e) {
+    RMW_SET_ERROR_MSG(e.what());
+  }
+  return true;
 }
 
 static const struct ddsi_sertype_ops sertype_rmw_ops = {
@@ -568,7 +645,8 @@ static const struct ddsi_sertype_ops sertype_rmw_ops = {
   nullptr,
   nullptr,
   nullptr,
-  nullptr
+  sertype_get_serialized_size,
+  sertype_serialize_into
 #endif
 };
 
@@ -608,17 +686,13 @@ static std::string get_type_name(const char * type_support_identifier, void * ty
 }
 
 struct sertype_rmw * create_sertype(
-  const char * topicname, const char * type_support_identifier,
+  const char * type_support_identifier,
   void * type_support, bool is_request_header,
   std::unique_ptr<rmw_cyclonedds_cpp::StructValueType> message_type,
   const uint32_t sample_size, const bool is_fixed_type)
 {
   struct sertype_rmw * st = new struct sertype_rmw;
-#if DDS_HAS_DDSI_SERTYPE
-  static_cast<void>(topicname);
   std::string type_name = get_type_name(type_support_identifier, type_support);
-  // TODO(Sumanth) fix this once Cyclone supports this API in master
-#ifdef DDS_HAS_SHM
   uint32_t flags = DDSI_SERTYPE_FLAG_TOPICKIND_NO_KEY;
   if (is_fixed_type) {
     flags |= DDSI_SERTYPE_FLAG_FIXED_SIZE;
@@ -626,21 +700,13 @@ struct sertype_rmw * create_sertype(
   ddsi_sertype_init_flags(
     static_cast<struct ddsi_sertype *>(st),
     type_name.c_str(), &sertype_rmw_ops, &serdata_rmw_ops, flags);
+  st->allowed_data_representation = DDS_DATA_REPRESENTATION_FLAG_XCDR1;
+#ifdef DDS_HAS_SHM
   // TODO(Sumanth) needs some API in cyclone to set this
   st->iox_size = sample_size;
 #else
-  (void)sample_size;
-  (void)is_fixed_type;
-  ddsi_sertype_init(
-    static_cast<struct ddsi_sertype *>(st),
-    type_name.c_str(), &sertype_rmw_ops, &serdata_rmw_ops, true);
+  static_cast<void>(sample_size);
 #endif  // DDS_HAS_SHM
-#else
-  std::string type_name = get_type_name(type_support_identifier, type_support);
-  ddsi_sertopic_init(
-    static_cast<struct ddsi_sertopic *>(st), topicname,
-    type_name.c_str(), &sertopic_rmw_ops, &serdata_rmw_ops, true);
-#endif
   st->type_support.typesupport_identifier_ = type_support_identifier;
   st->type_support.type_support_ = type_support;
   st->is_request_header = is_request_header;

@@ -32,9 +32,9 @@
 #include <regex>
 #include <limits>
 
+#include "rcutils/env.h"
 #include "rcutils/filesystem.h"
 #include "rcutils/format_string.h"
-#include "rcutils/get_env.h"
 #include "rcutils/logging_macros.h"
 #include "rcutils/strdup.h"
 
@@ -42,9 +42,11 @@
 #include "rmw/convert_rcutils_ret_to_rmw_ret.h"
 #include "rmw/error_handling.h"
 #include "rmw/event.h"
+#include "rmw/features.h"
 #include "rmw/get_node_info_and_types.h"
 #include "rmw/get_service_names_and_types.h"
 #include "rmw/get_topic_names_and_types.h"
+#include "rmw/event_callback_type.h"
 #include "rmw/names_and_types.h"
 #include "rmw/rmw.h"
 #include "rmw/sanity_checks.h"
@@ -71,13 +73,17 @@
 #include "rmw_dds_common/graph_cache.hpp"
 #include "rmw_dds_common/msg/participant_entities_info.hpp"
 #include "rmw_dds_common/qos.hpp"
+#include "rmw_dds_common/security.hpp"
 
 #include "rosidl_typesupport_cpp/message_type_support.hpp"
+
+#include "tracetools/tracetools.h"
 
 #include "namespace_prefix.hpp"
 
 #include "dds/dds.h"
 #include "dds/ddsc/dds_data_allocator.h"
+#include "dds/ddsc/dds_loan_api.h"
 #include "serdes.hpp"
 #include "serdata.hpp"
 #include "demangle.hpp"
@@ -223,18 +229,6 @@ struct CddsEntity
   dds_entity_t enth;
 };
 
-#if RMW_SUPPORT_SECURITY
-struct dds_security_files_t
-{
-  char * identity_ca_cert = nullptr;
-  char * cert = nullptr;
-  char * key = nullptr;
-  char * permissions_ca_cert = nullptr;
-  char * governance_p7s = nullptr;
-  char * permissions_p7s = nullptr;
-};
-#endif
-
 struct CddsDomain
 {
   /* This RMW implementation currently implements localhost-only by explicitly creating
@@ -276,7 +270,8 @@ struct CddsDomain
   {}
 };
 
-struct rmw_context_impl_t
+// Definition of struct rmw_context_impl_s as declared in rmw/init.h
+struct rmw_context_impl_s
 {
   rmw_dds_common::Context common;
   dds_domainid_t domain_id;
@@ -303,7 +298,7 @@ struct rmw_context_impl_t
      (protected by initialization_mutex) */
   uint32_t client_service_id;
 
-  rmw_context_impl_t()
+  rmw_context_impl_s()
   : common(), domain_id(UINT32_MAX), ppant(0), client_service_id(0)
   {
     /* destructor relies on these being initialized properly */
@@ -322,7 +317,7 @@ struct rmw_context_impl_t
   rmw_ret_t
   fini();
 
-  ~rmw_context_impl_t()
+  ~rmw_context_impl_s()
   {
     if (0u != this->node_count) {
       RCUTILS_SAFE_FWRITE_TO_STDERR(
@@ -341,6 +336,17 @@ struct CddsNode
 {
 };
 
+struct user_callback_data_t
+{
+  std::mutex mutex;
+  rmw_event_callback_t callback {nullptr};
+  const void * user_data {nullptr};
+  size_t unread_count {0};
+  rmw_event_callback_t event_callback[DDS_STATUS_ID_MAX + 1] {nullptr};
+  const void * event_data[DDS_STATUS_ID_MAX + 1] {nullptr};
+  size_t event_unread_count[DDS_STATUS_ID_MAX + 1] {0};
+};
+
 struct CddsPublisher : CddsEntity
 {
   dds_instance_handle_t pubiid;
@@ -350,6 +356,7 @@ struct CddsPublisher : CddsEntity
   dds_data_allocator_t data_allocator;
   uint32_t sample_size;
   bool is_loaning_available;
+  user_callback_data_t user_callback_data;
 };
 
 struct CddsSubscription : CddsEntity
@@ -359,6 +366,7 @@ struct CddsSubscription : CddsEntity
   rosidl_message_type_support_t type_supports;
   dds_data_allocator_t data_allocator;
   bool is_loaning_available;
+  user_callback_data_t user_callback_data;
 };
 
 struct client_service_id_t
@@ -384,11 +392,13 @@ struct CddsClient
   dds_time_t lastcheck;
   std::map<int64_t, dds_time_t> reqtime;
 #endif
+  user_callback_data_t user_callback_data;
 };
 
 struct CddsService
 {
   CddsCS service;
+  user_callback_data_t user_callback_data;
 };
 
 struct CddsGuardCondition
@@ -463,6 +473,253 @@ extern "C" rmw_ret_t rmw_set_log_severity(rmw_log_severity_t severity)
   return RMW_RET_OK;
 }
 
+static void dds_listener_callback(dds_entity_t entity, void * arg)
+{
+  // Not currently used
+  (void)entity;
+
+  auto data = static_cast<user_callback_data_t *>(arg);
+
+  std::lock_guard<std::mutex> guard(data->mutex);
+
+  if (data->callback) {
+    data->callback(data->user_data, 1);
+  } else {
+    data->unread_count++;
+  }
+}
+
+#define MAKE_DDS_EVENT_CALLBACK_FN(event_type, EVENT_TYPE) \
+  static void on_ ## event_type ## _fn( \
+    dds_entity_t entity, \
+    const dds_ ## event_type ## _status_t status, \
+    void * arg) \
+  { \
+    (void)status; \
+    (void)entity; \
+    auto data = static_cast<user_callback_data_t *>(arg); \
+    std::lock_guard<std::mutex> guard(data->mutex); \
+    auto cb = data->event_callback[DDS_ ## EVENT_TYPE ## _STATUS_ID]; \
+    if (cb) { \
+      cb(data->event_data[DDS_ ## EVENT_TYPE ## _STATUS_ID], 1); \
+    } else { \
+      data->event_unread_count[DDS_ ## EVENT_TYPE ## _STATUS_ID]++; \
+    } \
+  }
+
+// Define event callback functions
+MAKE_DDS_EVENT_CALLBACK_FN(requested_deadline_missed, REQUESTED_DEADLINE_MISSED)
+MAKE_DDS_EVENT_CALLBACK_FN(liveliness_lost, LIVELINESS_LOST)
+MAKE_DDS_EVENT_CALLBACK_FN(offered_deadline_missed, OFFERED_DEADLINE_MISSED)
+MAKE_DDS_EVENT_CALLBACK_FN(requested_incompatible_qos, REQUESTED_INCOMPATIBLE_QOS)
+MAKE_DDS_EVENT_CALLBACK_FN(sample_lost, SAMPLE_LOST)
+MAKE_DDS_EVENT_CALLBACK_FN(offered_incompatible_qos, OFFERED_INCOMPATIBLE_QOS)
+MAKE_DDS_EVENT_CALLBACK_FN(liveliness_changed, LIVELINESS_CHANGED)
+
+static void listener_set_event_callbacks(dds_listener_t * l, void * arg)
+{
+  dds_lset_requested_deadline_missed_arg(l, on_requested_deadline_missed_fn, arg, false);
+  dds_lset_requested_incompatible_qos_arg(l, on_requested_incompatible_qos_fn, arg, false);
+  dds_lset_sample_lost_arg(l, on_sample_lost_fn, arg, false);
+  dds_lset_liveliness_lost_arg(l, on_liveliness_lost_fn, arg, false);
+  dds_lset_offered_deadline_missed_arg(l, on_offered_deadline_missed_fn, arg, false);
+  dds_lset_offered_incompatible_qos_arg(l, on_offered_incompatible_qos_fn, arg, false);
+  dds_lset_liveliness_changed_arg(l, on_liveliness_changed_fn, arg, false);
+}
+
+static bool get_readwrite_qos(dds_entity_t handle, rmw_qos_profile_t * rmw_qos_policies)
+{
+  dds_qos_t * qos = dds_create_qos();
+  dds_return_t ret = false;
+  if (dds_get_qos(handle, qos) < 0) {
+    RMW_SET_ERROR_MSG("get_readwrite_qos: invalid handle");
+  } else {
+    ret = dds_qos_to_rmw_qos(qos, rmw_qos_policies);
+  }
+  dds_delete_qos(qos);
+  return ret;
+}
+
+extern "C" rmw_ret_t rmw_subscription_set_on_new_message_callback(
+  rmw_subscription_t * rmw_subscription,
+  rmw_event_callback_t callback,
+  const void * user_data)
+{
+  auto sub = static_cast<CddsSubscription *>(rmw_subscription->data);
+
+  user_callback_data_t * data = &(sub->user_callback_data);
+
+  std::lock_guard<std::mutex> guard(data->mutex);
+
+  // Set the user callback data
+  data->callback = callback;
+  data->user_data = user_data;
+
+  if (callback && data->unread_count) {
+    // Push events happened before having assigned a callback,
+    // limiting them to the QoS depth.
+    rmw_qos_profile_t sub_qos;
+
+    if (!get_readwrite_qos(sub->enth, &sub_qos)) {
+      return RMW_RET_ERROR;
+    }
+
+    size_t events = std::min(data->unread_count, sub_qos.depth);
+
+    callback(user_data, events);
+    data->unread_count = 0;
+  }
+
+  return RMW_RET_OK;
+}
+
+extern "C" rmw_ret_t rmw_service_set_on_new_request_callback(
+  rmw_service_t * rmw_service,
+  rmw_event_callback_t callback,
+  const void * user_data)
+{
+  auto srv = static_cast<CddsService *>(rmw_service->data);
+
+  user_callback_data_t * data = &(srv->user_callback_data);
+
+  std::lock_guard<std::mutex> guard(data->mutex);
+
+  // Set the user callback data
+  data->callback = callback;
+  data->user_data = user_data;
+
+  if (callback && data->unread_count) {
+    // Push events happened before having assigned a callback
+    callback(user_data, data->unread_count);
+    data->unread_count = 0;
+  }
+
+  return RMW_RET_OK;
+}
+
+extern "C" rmw_ret_t rmw_client_set_on_new_response_callback(
+  rmw_client_t * rmw_client,
+  rmw_event_callback_t callback,
+  const void * user_data)
+{
+  auto cli = static_cast<CddsClient *>(rmw_client->data);
+
+  user_callback_data_t * data = &(cli->user_callback_data);
+
+  std::lock_guard<std::mutex> guard(data->mutex);
+
+  // Set the user callback data
+  data->callback = callback;
+  data->user_data = user_data;
+
+  if (callback && data->unread_count) {
+    // Push events happened before having assigned a callback
+    callback(user_data, data->unread_count);
+    data->unread_count = 0;
+  }
+
+  return RMW_RET_OK;
+}
+
+template<typename T>
+static void event_set_callback(
+  T event,
+  dds_status_id_t status_id,
+  rmw_event_callback_t callback,
+  const void * user_data)
+{
+  user_callback_data_t * data = &(event->user_callback_data);
+
+  std::lock_guard<std::mutex> guard(data->mutex);
+
+  // Set the user callback data
+  data->event_callback[status_id] = callback;
+  data->event_data[status_id] = user_data;
+
+  if (callback && data->event_unread_count[status_id]) {
+    // Push events happened before having assigned a callback
+    callback(user_data, data->event_unread_count[status_id]);
+    data->event_unread_count[status_id] = 0;
+  }
+}
+
+extern "C" rmw_ret_t rmw_event_set_callback(
+  rmw_event_t * rmw_event,
+  rmw_event_callback_t callback,
+  const void * user_data)
+{
+  switch (rmw_event->event_type) {
+    case RMW_EVENT_LIVELINESS_CHANGED:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_LIVELINESS_CHANGED_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_REQUESTED_DEADLINE_MISSED:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_REQUESTED_DEADLINE_MISSED_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_REQUESTED_QOS_INCOMPATIBLE:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_REQUESTED_INCOMPATIBLE_QOS_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_MESSAGE_LOST:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_SAMPLE_LOST_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_LIVELINESS_LOST:
+      {
+        auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
+        event_set_callback(
+          pub_event, DDS_LIVELINESS_LOST_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_OFFERED_DEADLINE_MISSED:
+      {
+        auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
+        event_set_callback(
+          pub_event, DDS_OFFERED_DEADLINE_MISSED_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_OFFERED_QOS_INCOMPATIBLE:
+      {
+        auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
+        event_set_callback(
+          pub_event, DDS_OFFERED_INCOMPATIBLE_QOS_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_INVALID:
+      {
+        return RMW_RET_INVALID_ARGUMENT;
+      }
+  }
+  return RMW_RET_OK;
+}
+
 extern "C" rmw_ret_t rmw_init_options_init(
   rmw_init_options_t * init_options,
   rcutils_allocator_t allocator)
@@ -489,7 +746,7 @@ extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_i
   RMW_CHECK_ARGUMENT_FOR_NULL(src, RMW_RET_INVALID_ARGUMENT);
   RMW_CHECK_ARGUMENT_FOR_NULL(dst, RMW_RET_INVALID_ARGUMENT);
   if (NULL == src->implementation_identifier) {
-    RMW_SET_ERROR_MSG("expected initialized dst");
+    RMW_SET_ERROR_MSG("expected initialized src");
     return RMW_RET_INVALID_ARGUMENT;
   }
   RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
@@ -798,8 +1055,8 @@ static bool check_create_domain(dds_domainid_t did, rmw_localhost_only_t localho
        comma. */
     std::string config =
       localhost_only ?
-      "<CycloneDDS><Domain><General><NetworkInterfaceAddress>localhost</NetworkInterfaceAddress>"
-      "</General></Domain></CycloneDDS>,"
+      "<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"127.0.0.1\"/>"
+      "</Interfaces></General></Domain></CycloneDDS>,"
       :
       "";
 
@@ -844,76 +1101,6 @@ check_destroy_domain(dds_domainid_t domain_id)
   }
 }
 
-#if RMW_SUPPORT_SECURITY
-/*  Returns the full URI of a security file properly formatted for DDS  */
-bool get_security_file_URI(
-  char ** security_file, const char * security_filename, const char * node_secure_root,
-  const rcutils_allocator_t allocator)
-{
-  *security_file = nullptr;
-  char * file_path = rcutils_join_path(node_secure_root, security_filename, allocator);
-  if (file_path != nullptr) {
-    if (rcutils_is_readable(file_path)) {
-      /*  Cyclone also supports a "data:" URI  */
-      *security_file = rcutils_format_string(allocator, "file:%s", file_path);
-      allocator.deallocate(file_path, allocator.state);
-    } else {
-      RCUTILS_LOG_INFO_NAMED(
-        "rmw_cyclonedds_cpp", "get_security_file_URI: %s not found", file_path);
-      allocator.deallocate(file_path, allocator.state);
-    }
-  }
-  return *security_file != nullptr;
-}
-
-bool get_security_file_URIs(
-  const rmw_security_options_t * security_options,
-  dds_security_files_t & dds_security_files, rcutils_allocator_t allocator)
-{
-  bool ret = false;
-
-  if (security_options->security_root_path != nullptr) {
-    ret = (
-      get_security_file_URI(
-        &dds_security_files.identity_ca_cert, "identity_ca.cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.cert, "cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.key, "key.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.permissions_ca_cert, "permissions_ca.cert.pem",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.governance_p7s, "governance.p7s",
-        security_options->security_root_path, allocator) &&
-      get_security_file_URI(
-        &dds_security_files.permissions_p7s, "permissions.p7s",
-        security_options->security_root_path, allocator));
-  }
-  return ret;
-}
-
-void finalize_security_file_URIs(
-  dds_security_files_t dds_security_files, const rcutils_allocator_t allocator)
-{
-  allocator.deallocate(dds_security_files.identity_ca_cert, allocator.state);
-  dds_security_files.identity_ca_cert = nullptr;
-  allocator.deallocate(dds_security_files.cert, allocator.state);
-  dds_security_files.cert = nullptr;
-  allocator.deallocate(dds_security_files.key, allocator.state);
-  dds_security_files.key = nullptr;
-  allocator.deallocate(dds_security_files.permissions_ca_cert, allocator.state);
-  dds_security_files.permissions_ca_cert = nullptr;
-  allocator.deallocate(dds_security_files.governance_p7s, allocator.state);
-  dds_security_files.governance_p7s = nullptr;
-  allocator.deallocate(dds_security_files.permissions_p7s, allocator.state);
-  dds_security_files.permissions_p7s = nullptr;
-}
-#endif  /* RMW_SUPPORT_SECURITY */
-
 /* Attempt to set all the qos properties needed to enable DDS security */
 static
 rmw_ret_t configure_qos_for_security(
@@ -921,34 +1108,43 @@ rmw_ret_t configure_qos_for_security(
   const rmw_security_options_t * security_options)
 {
 #if RMW_SUPPORT_SECURITY
-  rmw_ret_t ret = RMW_RET_UNSUPPORTED;
-  dds_security_files_t dds_security_files;
-  rcutils_allocator_t allocator = rcutils_get_default_allocator();
-
-  if (get_security_file_URIs(security_options, dds_security_files, allocator)) {
-    dds_qset_prop(qos, "dds.sec.auth.identity_ca", dds_security_files.identity_ca_cert);
-    dds_qset_prop(qos, "dds.sec.auth.identity_certificate", dds_security_files.cert);
-    dds_qset_prop(qos, "dds.sec.auth.private_key", dds_security_files.key);
-    dds_qset_prop(qos, "dds.sec.access.permissions_ca", dds_security_files.permissions_ca_cert);
-    dds_qset_prop(qos, "dds.sec.access.governance", dds_security_files.governance_p7s);
-    dds_qset_prop(qos, "dds.sec.access.permissions", dds_security_files.permissions_p7s);
-
-    dds_qset_prop(qos, "dds.sec.auth.library.path", "dds_security_auth");
-    dds_qset_prop(qos, "dds.sec.auth.library.init", "init_authentication");
-    dds_qset_prop(qos, "dds.sec.auth.library.finalize", "finalize_authentication");
-
-    dds_qset_prop(qos, "dds.sec.crypto.library.path", "dds_security_crypto");
-    dds_qset_prop(qos, "dds.sec.crypto.library.init", "init_crypto");
-    dds_qset_prop(qos, "dds.sec.crypto.library.finalize", "finalize_crypto");
-
-    dds_qset_prop(qos, "dds.sec.access.library.path", "dds_security_ac");
-    dds_qset_prop(qos, "dds.sec.access.library.init", "init_access_control");
-    dds_qset_prop(qos, "dds.sec.access.library.finalize", "finalize_access_control");
-
-    ret = RMW_RET_OK;
+  std::unordered_map<std::string, std::string> security_files;
+  if (security_options->security_root_path == nullptr) {
+    return RMW_RET_UNSUPPORTED;
   }
-  finalize_security_file_URIs(dds_security_files, allocator);
-  return ret;
+
+  if (!rmw_dds_common::get_security_files(
+      "file:", security_options->security_root_path, security_files))
+  {
+    RCUTILS_LOG_INFO_NAMED(
+      "rmw_cyclonedds_cpp", "could not find all security files");
+    return RMW_RET_UNSUPPORTED;
+  }
+
+  dds_qset_prop(qos, "dds.sec.auth.identity_ca", security_files["IDENTITY_CA"].c_str());
+  dds_qset_prop(qos, "dds.sec.auth.identity_certificate", security_files["CERTIFICATE"].c_str());
+  dds_qset_prop(qos, "dds.sec.auth.private_key", security_files["PRIVATE_KEY"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.permissions_ca", security_files["PERMISSIONS_CA"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.governance", security_files["GOVERNANCE"].c_str());
+  dds_qset_prop(qos, "dds.sec.access.permissions", security_files["PERMISSIONS"].c_str());
+
+  dds_qset_prop(qos, "dds.sec.auth.library.path", "dds_security_auth");
+  dds_qset_prop(qos, "dds.sec.auth.library.init", "init_authentication");
+  dds_qset_prop(qos, "dds.sec.auth.library.finalize", "finalize_authentication");
+
+  dds_qset_prop(qos, "dds.sec.crypto.library.path", "dds_security_crypto");
+  dds_qset_prop(qos, "dds.sec.crypto.library.init", "init_crypto");
+  dds_qset_prop(qos, "dds.sec.crypto.library.finalize", "finalize_crypto");
+
+  dds_qset_prop(qos, "dds.sec.access.library.path", "dds_security_ac");
+  dds_qset_prop(qos, "dds.sec.access.library.init", "init_access_control");
+  dds_qset_prop(qos, "dds.sec.access.library.finalize", "finalize_access_control");
+
+  if (security_files.count("CRL") > 0) {
+    dds_qset_prop(qos, "org.eclipse.cyclonedds.sec.auth.crl", security_files["CRL"].c_str());
+  }
+
+  return RMW_RET_OK;
 #else
   (void) qos;
   if (security_options->enforce_security == RMW_SECURITY_ENFORCEMENT_ENFORCE) {
@@ -962,7 +1158,7 @@ rmw_ret_t configure_qos_for_security(
 }
 
 rmw_ret_t
-rmw_context_impl_t::init(rmw_init_options_t * options, size_t domain_id)
+rmw_context_impl_s::init(rmw_init_options_t * options, size_t domain_id)
 {
   std::lock_guard<std::mutex> guard(initialization_mutex);
   if (0u != this->node_count) {
@@ -1145,7 +1341,7 @@ rmw_context_impl_t::clean_up()
 }
 
 rmw_ret_t
-rmw_context_impl_t::fini()
+rmw_context_impl_s::fini()
 {
   std::lock_guard<std::mutex> guard(initialization_mutex);
   if (0u != --this->node_count) {
@@ -1156,7 +1352,6 @@ rmw_context_impl_t::fini()
   return RMW_RET_OK;
 }
 
-#ifdef DDS_HAS_SHM
 template<typename entityT>
 static void * init_and_alloc_sample(
   entityT & entity, const uint32_t sample_size, const bool alloc_on_heap = false)
@@ -1176,19 +1371,16 @@ static void * init_and_alloc_sample(
       return nullptr);
   }
   // allocate memory for message + header
-  auto chunk_ptr = dds_data_allocator_alloc(
-    &entity->data_allocator,
-    DETERMINE_ICEORYX_CHUNK_SIZE(sample_size));
+  // the header will be initialized and the chunk pointer will be returned
+  auto chunk_ptr = dds_data_allocator_alloc(&entity->data_allocator, sample_size);
   RMW_CHECK_FOR_NULL_WITH_MSG(
     chunk_ptr,
     "Failed to get loan",
     return nullptr);
-  auto ice_hdr = static_cast<iceoryx_header_t *>(chunk_ptr);
-  ice_hdr->data_size = sample_size;
-  auto ptr = SHIFT_PAST_ICEORYX_HEADER(chunk_ptr);
-  // initialize the memory for message
-  rmw_cyclonedds_cpp::init_message(&entity->type_supports, ptr);
-  return ptr;
+  // Don't initialize the message memory, as this allocated memory will anyways be filled by the
+  // user and initializing the memory here just creates undesired performance hit with the
+  // zero-copy path
+  return chunk_ptr;
 }
 
 template<typename entityT>
@@ -1200,7 +1392,7 @@ static rmw_ret_t fini_and_free_sample(entityT & entity, void * loaned_message)
   RET_EXPECTED(
     dds_data_allocator_free(
       &entity->data_allocator,
-      SHIFT_BACK_TO_ICEORYX_HEADER(loaned_message)),
+      loaned_message),
     DDS_RETCODE_OK,
     "Failed to free the loaned message",
     return RMW_RET_ERROR);
@@ -1212,7 +1404,6 @@ static rmw_ret_t fini_and_free_sample(entityT & entity, void * loaned_message)
     return RMW_RET_ERROR);
   return RMW_RET_OK;
 }
-#endif  // DDS_HAS_SHM
 
 extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t * context)
 {
@@ -1535,6 +1726,9 @@ extern "C" rmw_ret_t rmw_deserialize(
   } catch (rmw_cyclonedds_cpp::Exception & e) {
     RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("rmw_serialize: %s", e.what());
     ok = false;
+  } catch (std::runtime_error & e) {
+    RMW_SET_ERROR_MSG_WITH_FORMAT_STRING("rmw_serialize: %s", e.what());
+    ok = false;
   }
 
   return ok ? RMW_RET_OK : RMW_RET_ERROR;
@@ -1615,6 +1809,7 @@ extern "C" rmw_ret_t rmw_publish(
     return RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
   assert(pub);
+  TRACEPOINT(rmw_publish, ros_message);
   if (dds_write(pub->enth, ros_message) >= 0) {
     return RMW_RET_OK;
   } else {
@@ -1638,29 +1833,31 @@ extern "C" rmw_ret_t rmw_publish_serialized_message(
     serialized_message, "serialized message handle is null",
     return RMW_RET_INVALID_ARGUMENT);
   auto pub = static_cast<CddsPublisher *>(publisher->data);
+
   struct ddsi_serdata * d = serdata_rmw_from_serialized_message(
     pub->sertype, serialized_message->buffer, serialized_message->buffer_length);
+
 #ifdef DDS_HAS_SHM
-  // publishing a serialized message when SHM is ON
-  if (pub->is_loaning_available) {
-    auto sample_ptr = init_and_alloc_sample(pub, d->type->iox_size);
+  // publishing a serialized message when SHM is available
+  // (the type need not necessarily be fixed)
+  if (dds_is_shared_memory_available(pub->enth)) {
+    auto sample_ptr = init_and_alloc_sample(pub, serialized_message->buffer_length);
     RET_NULL_X(sample_ptr, return RMW_RET_ERROR);
-    if (rmw_deserialize(serialized_message, &pub->type_supports, sample_ptr) != RMW_RET_OK) {
-      RMW_SET_ERROR_MSG("Failed to deserialize sample into loaned memory");
-      return RMW_RET_ERROR;
-    }
-    d->iox_chunk = SHIFT_BACK_TO_ICEORYX_HEADER(sample_ptr);
+    memcpy(sample_ptr, serialized_message->buffer, serialized_message->buffer_length);
+    shm_set_data_state(sample_ptr, IOX_CHUNK_CONTAINS_SERIALIZED_DATA);
+    d->iox_chunk = sample_ptr;
   }
 #endif
+
   const bool ok = (dds_writecdr(pub->enth, d) >= 0);
   return ok ? RMW_RET_OK : RMW_RET_ERROR;
 }
 
-#ifdef DDS_HAS_SHM
 static rmw_ret_t publish_loaned_int(
   const rmw_publisher_t * publisher,
   void * ros_message)
 {
+#ifdef DDS_HAS_SHM
   RMW_CHECK_FOR_NULL_WITH_MSG(
     publisher, "publisher handle is null",
     return RMW_RET_INVALID_ARGUMENT);
@@ -1683,12 +1880,16 @@ static rmw_ret_t publish_loaned_int(
 
   // if the publisher allow loaning
   if (cdds_publisher->is_loaning_available) {
-    auto d = std::make_unique<serdata_rmw>(cdds_publisher->sertype, ddsi_serdata_kind::SDK_DATA);
-    d->iox_chunk = SHIFT_BACK_TO_ICEORYX_HEADER(ros_message);
-    if (dds_writecdr(cdds_publisher->enth, d.release()) >= 0) {
+    auto d = new serdata_rmw(cdds_publisher->sertype, ddsi_serdata_kind::SDK_DATA);
+    d->iox_chunk = ros_message;
+    // since we write the loaned chunk here, set the data state to raw
+    shm_set_data_state(d->iox_chunk, IOX_CHUNK_CONTAINS_RAW_DATA);
+    if (dds_writecdr(cdds_publisher->enth, d) >= 0) {
       return RMW_RET_OK;
     } else {
       RMW_SET_ERROR_MSG("Failed to publish data");
+      fini_and_free_sample(cdds_publisher, ros_message);
+      ddsi_serdata_unref(d);
       return RMW_RET_ERROR;
     }
   } else {
@@ -1696,8 +1897,13 @@ static rmw_ret_t publish_loaned_int(
     return RMW_RET_ERROR;
   }
   return RMW_RET_OK;
-}
+#else
+  static_cast<void>(publisher);
+  static_cast<void>(ros_message);
+  RMW_SET_ERROR_MSG("rmw_publish_loaned_message not implemented for rmw_cyclonedds_cpp");
+  return RMW_RET_UNSUPPORTED;
 #endif
+}
 
 extern "C" rmw_ret_t rmw_publish_loaned_message(
   const rmw_publisher_t * publisher,
@@ -1705,14 +1911,7 @@ extern "C" rmw_ret_t rmw_publish_loaned_message(
   rmw_publisher_allocation_t * allocation)
 {
   static_cast<void>(allocation);
-#ifdef DDS_HAS_SHM
   return publish_loaned_int(publisher, ros_message);
-#else
-  static_cast<void>(publisher);
-  static_cast<void>(ros_message);
-  RMW_SET_ERROR_MSG("rmw_publish_loaned_message not implemented for rmw_cyclonedds_cpp");
-  return RMW_RET_UNSUPPORTED;
-#endif
 }
 
 static const rosidl_message_type_support_t * get_typesupport(
@@ -2019,19 +2218,6 @@ static bool dds_qos_to_rmw_qos(const dds_qos_t * dds_qos, rmw_qos_profile_t * qo
   return true;
 }
 
-static bool get_readwrite_qos(dds_entity_t handle, rmw_qos_profile_t * rmw_qos_policies)
-{
-  dds_qos_t * qos = dds_create_qos();
-  dds_return_t ret = false;
-  if (dds_get_qos(handle, qos) < 0) {
-    RMW_SET_ERROR_MSG("get_readwrite_qos: invalid handle");
-  } else {
-    ret = dds_qos_to_rmw_qos(qos, rmw_qos_policies);
-  }
-  dds_delete_qos(qos);
-  return ret;
-}
-
 static bool is_type_self_contained(const rosidl_message_type_support_t * type_supports)
 {
   auto ts = get_message_typesupport_handle(
@@ -2076,11 +2262,16 @@ static CddsPublisher * create_cdds_publisher(
   bool is_fixed_type = is_type_self_contained(type_support);
   uint32_t sample_size = static_cast<uint32_t>(rmw_cyclonedds_cpp::get_message_size(type_support));
   auto sertype = create_sertype(
-    fqtopic_name.c_str(), type_support->typesupport_identifier,
+    type_support->typesupport_identifier,
     create_message_type_support(type_support->data, type_support->typesupport_identifier), false,
     rmw_cyclonedds_cpp::make_message_value_type(type_supports), sample_size, is_fixed_type);
-  struct ddsi_sertype * stact;
+  struct ddsi_sertype * stact = nullptr;
   topic = create_topic(dds_ppant, fqtopic_name.c_str(), sertype, &stact);
+
+  dds_listener_t * listener = dds_create_listener(&pub->user_callback_data);
+  // Set the corresponding callbacks to listen for events
+  listener_set_event_callbacks(listener, &pub->user_callback_data);
+
   if (topic < 0) {
     RMW_SET_ERROR_MSG("failed to create topic");
     goto fail_topic;
@@ -2088,7 +2279,7 @@ static CddsPublisher * create_cdds_publisher(
   if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
     goto fail_qos;
   }
-  if ((pub->enth = dds_create_writer(dds_pub, topic, qos, nullptr)) < 0) {
+  if ((pub->enth = dds_create_writer(dds_pub, topic, qos, listener)) < 0) {
     RMW_SET_ERROR_MSG("failed to create writer");
     goto fail_writer;
   }
@@ -2098,13 +2289,9 @@ static CddsPublisher * create_cdds_publisher(
   }
   get_entity_gid(pub->enth, pub->gid);
   pub->sertype = stact;
+  dds_delete_listener(listener);
   pub->type_supports = *type_supports;
-  pub->is_loaning_available =
-#ifdef DDS_HAS_SHM
-    is_fixed_type && dds_is_loan_available(pub->enth);
-#else
-    false;
-#endif  // DDS_HAS_SHM
+  pub->is_loaning_available = is_fixed_type && dds_is_loan_available(pub->enth);
   pub->sample_size = sample_size;
   dds_delete_qos(qos);
   dds_delete(topic);
@@ -2215,6 +2402,13 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
       return nullptr;
     }
   }
+  // Adapt any 'best available' QoS options
+  rmw_qos_profile_t adapted_qos_policies = *qos_policies;
+  rmw_ret_t ret = rmw_dds_common::qos_profile_get_best_available_for_topic_publisher(
+    node, topic_name, &adapted_qos_policies, rmw_get_subscriptions_info_by_topic);
+  if (RMW_RET_OK != ret) {
+    return nullptr;
+  }
   RMW_CHECK_ARGUMENT_FOR_NULL(publisher_options, nullptr);
   if (publisher_options->require_unique_network_flow_endpoints ==
     RMW_UNIQUE_NETWORK_FLOW_ENDPOINTS_STRICTLY_REQUIRED)
@@ -2226,7 +2420,7 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
 
   rmw_publisher_t * pub = create_publisher(
     node->context->impl->ppant, node->context->impl->dds_pub,
-    type_supports, topic_name, qos_policies,
+    type_supports, topic_name, &adapted_qos_policies,
     publisher_options);
   if (pub == nullptr) {
     return nullptr;
@@ -2258,6 +2452,7 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
   }
 
   cleanup_publisher.cancel();
+  TRACEPOINT(rmw_publisher_init, static_cast<const void *>(pub), cddspub->gid.data);
   return pub;
 }
 
@@ -2334,6 +2529,39 @@ rmw_ret_t rmw_publisher_assert_liveliness(const rmw_publisher_t * publisher)
   return RMW_RET_OK;
 }
 
+rmw_ret_t rmw_publisher_wait_for_all_acked(
+  const rmw_publisher_t * publisher,
+  rmw_time_t wait_timeout)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    publisher,
+    publisher->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+
+  auto pub = static_cast<CddsPublisher *>(publisher->data);
+  if (pub == nullptr) {
+    RMW_SET_ERROR_MSG("The publisher is not a valid publisher.");
+    return RMW_RET_INVALID_ARGUMENT;
+  }
+
+  dds_duration_t timeout = rmw_duration_to_dds(wait_timeout);
+  switch (dds_wait_for_acks(pub->enth, timeout)) {
+    case DDS_RETCODE_OK:
+      return RMW_RET_OK;
+    case DDS_RETCODE_BAD_PARAMETER:
+      RMW_SET_ERROR_MSG("The publisher is not a valid publisher.");
+      return RMW_RET_INVALID_ARGUMENT;
+    case DDS_RETCODE_TIMEOUT:
+      return RMW_RET_TIMEOUT;
+    case DDS_RETCODE_UNSUPPORTED:
+      return RMW_RET_UNSUPPORTED;
+    default:
+      return RMW_RET_ERROR;
+  }
+}
+
 rmw_ret_t rmw_publisher_get_actual_qos(const rmw_publisher_t * publisher, rmw_qos_profile_t * qos)
 {
   RMW_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
@@ -2350,12 +2578,12 @@ rmw_ret_t rmw_publisher_get_actual_qos(const rmw_publisher_t * publisher, rmw_qo
   return RMW_RET_ERROR;
 }
 
-#ifdef DDS_HAS_SHM
 static rmw_ret_t borrow_loaned_message_int(
   const rmw_publisher_t * publisher,
   const rosidl_message_type_support_t * type_support,
   void ** ros_message)
 {
+#ifdef DDS_HAS_SHM
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
   if (!publisher->can_loan_messages) {
     RMW_SET_ERROR_MSG("Loaning is not supported");
@@ -2367,6 +2595,10 @@ static rmw_ret_t borrow_loaned_message_int(
     publisher->implementation_identifier,
     eclipse_cyclonedds_identifier,
     return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RCUTILS_CHECK_ARGUMENT_FOR_NULL(ros_message, RMW_RET_INVALID_ARGUMENT);
+  if (*ros_message) {
+    return RMW_RET_INVALID_ARGUMENT;
+  }
   auto cdds_publisher = static_cast<CddsPublisher *>(publisher->data);
   if (!cdds_publisher) {
     RMW_SET_ERROR_MSG("publisher data is null");
@@ -2383,16 +2615,6 @@ static rmw_ret_t borrow_loaned_message_int(
     RMW_SET_ERROR_MSG("Borrowing loan for a non fixed type is not allowed");
     return RMW_RET_ERROR;
   }
-}
-#endif
-
-extern "C" rmw_ret_t rmw_borrow_loaned_message(
-  const rmw_publisher_t * publisher,
-  const rosidl_message_type_support_t * type_support,
-  void ** ros_message)
-{
-#ifdef DDS_HAS_SHM
-  return borrow_loaned_message_int(publisher, type_support, ros_message);
 #else
   (void) publisher;
   (void) type_support;
@@ -2402,11 +2624,19 @@ extern "C" rmw_ret_t rmw_borrow_loaned_message(
 #endif
 }
 
-#ifdef DDS_HAS_SHM
+extern "C" rmw_ret_t rmw_borrow_loaned_message(
+  const rmw_publisher_t * publisher,
+  const rosidl_message_type_support_t * type_support,
+  void ** ros_message)
+{
+  return borrow_loaned_message_int(publisher, type_support, ros_message);
+}
+
 static rmw_ret_t return_loaned_message_from_publisher_int(
   const rmw_publisher_t * publisher,
   void * loaned_message)
 {
+#ifdef DDS_HAS_SHM
   RCUTILS_CHECK_ARGUMENT_FOR_NULL(publisher, RMW_RET_INVALID_ARGUMENT);
   if (!publisher->can_loan_messages) {
     RMW_SET_ERROR_MSG("Loaning is not supported");
@@ -2432,15 +2662,6 @@ static rmw_ret_t return_loaned_message_from_publisher_int(
     RMW_SET_ERROR_MSG("returning loan for a non fixed type is not allowed");
     return RMW_RET_ERROR;
   }
-}
-#endif
-
-extern "C" rmw_ret_t rmw_return_loaned_message_from_publisher(
-  const rmw_publisher_t * publisher,
-  void * loaned_message)
-{
-#ifdef DDS_HAS_SHM
-  return return_loaned_message_from_publisher_int(publisher, loaned_message);
 #else
   (void) publisher;
   (void) loaned_message;
@@ -2448,6 +2669,13 @@ extern "C" rmw_ret_t rmw_return_loaned_message_from_publisher(
     "rmw_return_loaned_message_from_publisher not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
 #endif
+}
+
+extern "C" rmw_ret_t rmw_return_loaned_message_from_publisher(
+  const rmw_publisher_t * publisher,
+  void * loaned_message)
+{
+  return return_loaned_message_from_publisher_int(publisher, loaned_message);
 }
 
 static rmw_ret_t destroy_publisher(rmw_publisher_t * publisher)
@@ -2543,10 +2771,17 @@ static CddsSubscription * create_cdds_subscription(
   bool is_fixed_type = is_type_self_contained(type_support);
   uint32_t sample_size = static_cast<uint32_t>(rmw_cyclonedds_cpp::get_message_size(type_support));
   auto sertype = create_sertype(
-    fqtopic_name.c_str(), type_support->typesupport_identifier,
+    type_support->typesupport_identifier,
     create_message_type_support(type_support->data, type_support->typesupport_identifier), false,
     rmw_cyclonedds_cpp::make_message_value_type(type_supports), sample_size, is_fixed_type);
   topic = create_topic(dds_ppant, fqtopic_name.c_str(), sertype);
+
+  dds_listener_t * listener = dds_create_listener(&sub->user_callback_data);
+  // Set the callback to listen for new messages
+  dds_lset_data_available_arg(listener, dds_listener_callback, &sub->user_callback_data, false);
+  // Set the corresponding callbacks to listen for events
+  listener_set_event_callbacks(listener, &sub->user_callback_data);
+
   if (topic < 0) {
     RMW_SET_ERROR_MSG("failed to create topic");
     goto fail_topic;
@@ -2554,7 +2789,7 @@ static CddsSubscription * create_cdds_subscription(
   if ((qos = create_readwrite_qos(qos_policies, ignore_local_publications)) == nullptr) {
     goto fail_qos;
   }
-  if ((sub->enth = dds_create_reader(dds_sub, topic, qos, nullptr)) < 0) {
+  if ((sub->enth = dds_create_reader(dds_sub, topic, qos, listener)) < 0) {
     RMW_SET_ERROR_MSG("failed to create reader");
     goto fail_reader;
   }
@@ -2563,13 +2798,9 @@ static CddsSubscription * create_cdds_subscription(
     RMW_SET_ERROR_MSG("failed to create readcondition");
     goto fail_readcond;
   }
+  dds_delete_listener(listener);
   sub->type_supports = *type_support;
-  sub->is_loaning_available =
-#ifdef DDS_HAS_SHM
-    is_fixed_type && dds_is_loan_available(sub->enth);
-#else
-    false;
-#endif  // DDS_HAS_SHM
+  sub->is_loaning_available = is_fixed_type && dds_is_loan_available(sub->enth);
   dds_delete_qos(qos);
   dds_delete(topic);
   return sub;
@@ -2649,6 +2880,7 @@ static rmw_subscription_t * create_subscription(
   memcpy(const_cast<char *>(rmw_subscription->topic_name), topic_name, strlen(topic_name) + 1);
   rmw_subscription->options = *subscription_options;
   rmw_subscription->can_loan_messages = sub->is_loaning_available;
+  rmw_subscription->is_cft_enabled = false;
 
   cleanup_subscription.cancel();
   cleanup_rmw_subscription.cancel();
@@ -2685,6 +2917,13 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
       return nullptr;
     }
   }
+  // Adapt any 'best available' QoS options
+  rmw_qos_profile_t adapted_qos_policies = *qos_policies;
+  rmw_ret_t ret = rmw_dds_common::qos_profile_get_best_available_for_topic_subscription(
+    node, topic_name, &adapted_qos_policies, rmw_get_publishers_info_by_topic);
+  if (RMW_RET_OK != ret) {
+    return nullptr;
+  }
   RMW_CHECK_ARGUMENT_FOR_NULL(subscription_options, nullptr);
   if (subscription_options->require_unique_network_flow_endpoints ==
     RMW_UNIQUE_NETWORK_FLOW_ENDPOINTS_STRICTLY_REQUIRED)
@@ -2696,7 +2935,7 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
 
   rmw_subscription_t * sub = create_subscription(
     node->context->impl->ppant, node->context->impl->dds_sub,
-    type_supports, topic_name, qos_policies,
+    type_supports, topic_name, &adapted_qos_policies,
     subscription_options);
   if (sub == nullptr) {
     return nullptr;
@@ -2730,6 +2969,7 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
   }
 
   cleanup_subscription.cancel();
+  TRACEPOINT(rmw_subscription_init, static_cast<const void *>(sub), cddssub->gid.data);
   return sub;
 }
 
@@ -2771,6 +3011,30 @@ extern "C" rmw_ret_t rmw_subscription_get_actual_qos(
     return RMW_RET_OK;
   }
   return RMW_RET_ERROR;
+}
+
+extern "C" rmw_ret_t rmw_subscription_set_content_filter(
+  rmw_subscription_t * subscription,
+  const rmw_subscription_content_filter_options_t * options)
+{
+  static_cast<void>(subscription);
+  static_cast<void>(options);
+
+  RMW_SET_ERROR_MSG("rmw_subscription_set_content_filter: unimplemented");
+  return RMW_RET_UNSUPPORTED;
+}
+
+extern "C" rmw_ret_t rmw_subscription_get_content_filter(
+  const rmw_subscription_t * subscription,
+  rcutils_allocator_t * allocator,
+  rmw_subscription_content_filter_options_t * options)
+{
+  static_cast<void>(subscription);
+  static_cast<void>(allocator);
+  static_cast<void>(options);
+
+  RMW_SET_ERROR_MSG("rmw_subscription_get_content_filter: unimplemented");
+  return RMW_RET_UNSUPPORTED;
 }
 
 static rmw_ret_t destroy_subscription(rmw_subscription_t * subscription)
@@ -2819,7 +3083,7 @@ extern "C" rmw_ret_t rmw_destroy_subscription(rmw_node_t * node, rmw_subscriptio
     const auto cddssub = static_cast<const CddsSubscription *>(subscription->data);
     std::lock_guard<std::mutex> guard(common->node_update_mutex);
     rmw_dds_common::msg::ParticipantEntitiesInfo msg =
-      common->graph_cache.dissociate_writer(
+      common->graph_cache.dissociate_reader(
       cddssub->gid, common->gid, node->name,
       node->namespace_);
     ret = rmw_publish(common->pub, static_cast<void *>(&msg), nullptr);
@@ -2842,6 +3106,22 @@ extern "C" rmw_ret_t rmw_destroy_subscription(rmw_node_t * node, rmw_subscriptio
   }
 
   return ret;
+}
+
+static void message_info_from_sample_info(
+  const dds_sample_info_t & info, rmw_message_info_t * message_info)
+{
+  message_info->publisher_gid.implementation_identifier = eclipse_cyclonedds_identifier;
+  memset(message_info->publisher_gid.data, 0, sizeof(message_info->publisher_gid.data));
+  assert(sizeof(info.publication_handle) <= sizeof(message_info->publisher_gid.data));
+  memcpy(
+    message_info->publisher_gid.data, &info.publication_handle,
+    sizeof(info.publication_handle));
+  message_info->source_timestamp = info.source_timestamp;
+  // TODO(iluetkeb) add received timestamp, when implemented by Cyclone
+  message_info->received_timestamp = 0;
+  message_info->publication_sequence_number = RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED;
+  message_info->reception_sequence_number = RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED;
 }
 
 static rmw_ret_t rmw_take_int(
@@ -2868,15 +3148,7 @@ static rmw_ret_t rmw_take_int(
     if (info.valid_data) {
       *taken = true;
       if (message_info) {
-        message_info->publisher_gid.implementation_identifier = eclipse_cyclonedds_identifier;
-        memset(message_info->publisher_gid.data, 0, sizeof(message_info->publisher_gid.data));
-        assert(sizeof(info.publication_handle) <= sizeof(message_info->publisher_gid.data));
-        memcpy(
-          message_info->publisher_gid.data, &info.publication_handle,
-          sizeof(info.publication_handle));
-        message_info->source_timestamp = info.source_timestamp;
-        // TODO(iluetkeb) add received timestamp, when implemented by Cyclone
-        message_info->received_timestamp = 0;
+        message_info_from_sample_info(info, message_info);
       }
 #if REPORT_LATE_MESSAGES > 0
       dds_time_t tnow = dds_time();
@@ -2885,10 +3157,17 @@ static rmw_ret_t rmw_take_int(
         fprintf(stderr, "** sample in history for %.fms\n", static_cast<double>(dt) / 1e6);
       }
 #endif
-      return RMW_RET_OK;
+      goto take_done;
     }
   }
   *taken = false;
+take_done:
+  TRACEPOINT(
+    rmw_take,
+    static_cast<const void *>(subscription),
+    static_cast<const void *>(ros_message),
+    (message_info ? message_info->source_timestamp : 0LL),
+    *taken);
   return RMW_RET_OK;
 }
 
@@ -2966,12 +3245,7 @@ static rmw_ret_t rmw_take_seq(
       taken_msg.push_back(message);
       (*taken)++;
       if (message_info) {
-        message_info->publisher_gid.implementation_identifier = eclipse_cyclonedds_identifier;
-        memset(message_info->publisher_gid.data, 0, sizeof(message_info->publisher_gid.data));
-        assert(sizeof(info.publication_handle) <= sizeof(message_info->publisher_gid.data));
-        memcpy(
-          message_info->publisher_gid.data, &info.publication_handle,
-          sizeof(info.publication_handle));
+        message_info_from_sample_info(info, message_info);
       }
     } else {
       not_taken_msg.push_back(message);
@@ -3014,30 +3288,42 @@ static rmw_ret_t rmw_take_ser_int(
   while (dds_takecdr(sub->enth, &d, 1, &info, DDS_ANY_STATE) == 1) {
     if (info.valid_data) {
       if (message_info) {
-        message_info->publisher_gid.implementation_identifier = eclipse_cyclonedds_identifier;
-        memset(message_info->publisher_gid.data, 0, sizeof(message_info->publisher_gid.data));
-        assert(sizeof(info.publication_handle) <= sizeof(message_info->publisher_gid.data));
-        memcpy(
-          message_info->publisher_gid.data, &info.publication_handle,
-          sizeof(info.publication_handle));
+        message_info_from_sample_info(info, message_info);
       }
 
       // taking a serialized msg from shared memory
 #ifdef DDS_HAS_SHM
-      if (sub->is_loaning_available && d->iox_chunk != nullptr) {
-        if (rmw_serialize(
-            SHIFT_PAST_ICEORYX_HEADER(d->iox_chunk), &sub->type_supports,
-            serialized_message) != RMW_RET_OK)
-        {
-          RMW_SET_ERROR_MSG("Failed to srialize sample from loaned memory");
+      if (d->iox_chunk != nullptr) {
+        auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
+        if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
+          const size_t size = iox_header->data_size;
+          if (rmw_serialized_message_resize(serialized_message, size) != RMW_RET_OK) {
+            ddsi_serdata_unref(d);
+            *taken = false;
+            return RMW_RET_ERROR;
+          }
+          ddsi_serdata_to_ser(d, 0, size, serialized_message->buffer);
+          serialized_message->buffer_length = size;
+          ddsi_serdata_unref(d);
+          *taken = true;
+          return RMW_RET_OK;
+        } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
+          if (rmw_serialize(d->iox_chunk, &sub->type_supports, serialized_message) != RMW_RET_OK) {
+            RMW_SET_ERROR_MSG("Failed to serialize sample from loaned memory");
+            ddsi_serdata_unref(d);
+            *taken = false;
+            return RMW_RET_ERROR;
+          }
+          ddsi_serdata_unref(d);
+          *taken = true;
+          return RMW_RET_OK;
+        } else {
+          RMW_SET_ERROR_MSG("The recieved sample over SHM is not initialized");
+          ddsi_serdata_unref(d);
           return RMW_RET_ERROR;
         }
-        // free the loaned memory
-        dds_data_allocator_init(sub->enth, &sub->data_allocator);
-        dds_data_allocator_free(&sub->data_allocator, d->iox_chunk);
-        dds_data_allocator_fini(&sub->data_allocator);
-        *taken = true;
-        return RMW_RET_OK;
+        // release the chunk
+        free_iox_chunk(static_cast<iox_sub_t *>(d->iox_subscriber), &d->iox_chunk);
       } else  // NOLINT
 #endif
       {
@@ -3060,13 +3346,13 @@ static rmw_ret_t rmw_take_ser_int(
   return RMW_RET_OK;
 }
 
-#ifdef DDS_HAS_SHM
 static rmw_ret_t rmw_take_loan_int(
   const rmw_subscription_t * subscription,
   void ** loaned_message,
   bool * taken,
   rmw_message_info_t * message_info)
 {
+#ifdef DDS_HAS_SHM
   RMW_CHECK_ARGUMENT_FOR_NULL(
     subscription, RMW_RET_INVALID_ARGUMENT);
   if (!subscription->can_loan_messages) {
@@ -3092,38 +3378,72 @@ static rmw_ret_t rmw_take_loan_int(
   while (dds_takecdr(cdds_subscription->enth, &d, 1, &info, DDS_ANY_STATE) == 1) {
     if (info.valid_data) {
       if (message_info) {
-        message_info->publisher_gid.implementation_identifier = eclipse_cyclonedds_identifier;
-        memset(message_info->publisher_gid.data, 0, sizeof(message_info->publisher_gid.data));
-        assert(sizeof(info.publication_handle) <= sizeof(message_info->publisher_gid.data));
-        memcpy(
-          message_info->publisher_gid.data, &info.publication_handle,
-          sizeof(info.publication_handle));
+        message_info_from_sample_info(info, message_info);
       }
       if (d->iox_chunk != nullptr) {
-        *loaned_message = SHIFT_PAST_ICEORYX_HEADER(d->iox_chunk);
+        // the iox chunk has data, based on the kind of the data return the data accordingly to
+        // the user
+        auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
+        // if the iox chunk has the data in serialized form
+        if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
+          rmw_serialized_message_t ser_msg;
+          ser_msg.buffer_length = iox_header->data_size;
+          ser_msg.buffer = static_cast<uint8_t *>(d->iox_chunk);
+          if (rmw_deserialize(&ser_msg, &cdds_subscription->type_supports, *loaned_message) !=
+            RMW_RET_OK)
+          {
+            RMW_SET_ERROR_MSG("Failed to deserialize sample from shared memory buffer");
+            ddsi_serdata_unref(d);
+            *taken = false;
+            return RMW_RET_ERROR;
+          }
+        } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
+          *loaned_message = d->iox_chunk;
+        } else {
+          RMW_SET_ERROR_MSG("Received iox chunk is uninitialized");
+          ddsi_serdata_unref(d);
+          *taken = false;
+          return RMW_RET_ERROR;
+        }
         *taken = true;
-        // doesn't allocate, but initialise the allocator to free the chunk later
+        // doesn't allocate, but initialise the allocator to free the chunk later when the loan
+        // is returned
         dds_data_allocator_init(
           cdds_subscription->enth, &cdds_subscription->data_allocator);
+        // set the loaned chunk to null, so that the  loaned chunk is not release in
+        // rmw_serdata_free(), but will be released when
+        // `rmw_return_loaned_message_from_subscription()` is called
+        d->iox_chunk = nullptr;
+        ddsi_serdata_unref(d);
         return RMW_RET_OK;
       } else if (d->type->iox_size > 0U) {
         auto sample_ptr = init_and_alloc_sample(cdds_subscription, d->type->iox_size, true);
         RET_NULL_X(sample_ptr, return RMW_RET_ERROR);
         ddsi_serdata_to_sample(d, sample_ptr, nullptr, nullptr);
         *loaned_message = sample_ptr;
+        ddsi_serdata_unref(d);
         *taken = true;
         return RMW_RET_OK;
       } else {
         RMW_SET_ERROR_MSG("Data nor loan is available to take");
+        ddsi_serdata_unref(d);
         *taken = false;
         return RMW_RET_ERROR;
       }
     }
+    ddsi_serdata_unref(d);
   }
   *taken = false;
   return RMW_RET_OK;
-}
+#else
+  static_cast<void>(subscription);
+  static_cast<void>(loaned_message);
+  static_cast<void>(taken);
+  static_cast<void>(message_info);
+  RMW_SET_ERROR_MSG("rmw_take_loaned_message not implemented for rmw_cyclonedds_cpp");
+  return RMW_RET_UNSUPPORTED;
 #endif
+}
 
 extern "C" rmw_ret_t rmw_take(
   const rmw_subscription_t * subscription, void * ros_message,
@@ -3183,15 +3503,7 @@ extern "C" rmw_ret_t rmw_take_loaned_message(
   rmw_subscription_allocation_t * allocation)
 {
   static_cast<void>(allocation);
-#ifdef DDS_HAS_SHM
   return rmw_take_loan_int(subscription, loaned_message, taken, nullptr);
-#else
-  static_cast<void>(subscription);
-  static_cast<void>(loaned_message);
-  static_cast<void>(taken);
-  RMW_SET_ERROR_MSG("rmw_take_loaned_message not implemented for rmw_cyclonedds_cpp");
-  return RMW_RET_UNSUPPORTED;
-#endif
 }
 
 extern "C" rmw_ret_t rmw_take_loaned_message_with_info(
@@ -3202,26 +3514,16 @@ extern "C" rmw_ret_t rmw_take_loaned_message_with_info(
   rmw_subscription_allocation_t * allocation)
 {
   static_cast<void>(allocation);
-#ifdef DDS_HAS_SHM
   RMW_CHECK_ARGUMENT_FOR_NULL(
     message_info, RMW_RET_INVALID_ARGUMENT);
-  static_cast<void>(allocation);
   return rmw_take_loan_int(subscription, loaned_message, taken, message_info);
-#else
-  static_cast<void>(subscription);
-  static_cast<void>(loaned_message);
-  static_cast<void>(taken);
-  static_cast<void>(message_info);
-  RMW_SET_ERROR_MSG("rmw_take_loaned_message_with_info not implemented for rmw_cyclonedds_cpp");
-  return RMW_RET_UNSUPPORTED;
-#endif
 }
 
-#ifdef DDS_HAS_SHM
 static rmw_ret_t return_loaned_message_from_subscription_int(
   const rmw_subscription_t * subscription,
   void * loaned_message)
 {
+#ifdef DDS_HAS_SHM
   RMW_CHECK_ARGUMENT_FOR_NULL(
     subscription, RMW_RET_INVALID_ARGUMENT);
   if (!subscription->can_loan_messages) {
@@ -3248,15 +3550,6 @@ static rmw_ret_t return_loaned_message_from_subscription_int(
     return RMW_RET_ERROR;
   }
   return RMW_RET_OK;
-}
-#endif
-
-extern "C" rmw_ret_t rmw_return_loaned_message_from_subscription(
-  const rmw_subscription_t * subscription,
-  void * loaned_message)
-{
-#ifdef DDS_HAS_SHM
-  return return_loaned_message_from_subscription_int(subscription, loaned_message);
 #else
   (void) subscription;
   (void) loaned_message;
@@ -3264,6 +3557,13 @@ extern "C" rmw_ret_t rmw_return_loaned_message_from_subscription(
     "rmw_return_loaned_message_from_subscription not implemented for rmw_cyclonedds_cpp");
   return RMW_RET_UNSUPPORTED;
 #endif
+}
+
+extern "C" rmw_ret_t rmw_return_loaned_message_from_subscription(
+  const rmw_subscription_t * subscription,
+  void * loaned_message)
+{
+  return return_loaned_message_from_subscription_int(subscription, loaned_message);
 }
 /////////////////////////////////////////////////////////////////////////////////////////
 ///////////                                                                   ///////////
@@ -3875,15 +4175,15 @@ static rmw_ret_t get_matched_endpoints(
   if ((ret = fn(h, res.data(), res.size())) < 0) {
     return RMW_RET_ERROR;
   }
-  while ((size_t) ret >= res.size()) {
+  while (static_cast<size_t>(ret) >= res.size()) {
     // 128 is a completely arbitrary margin to reduce the risk of having to retry
     // when matches are create/deleted in parallel
-    res.resize((size_t) ret + 128);
+    res.resize(static_cast<size_t>(ret) + 128);
     if ((ret = fn(h, res.data(), res.size())) < 0) {
       return RMW_RET_ERROR;
     }
   }
-  res.resize((size_t) ret);
+  res.resize(static_cast<size_t>(ret));
   return RMW_RET_OK;
 }
 
@@ -4230,7 +4530,8 @@ static void get_unique_csid(const rmw_node_t * node, client_service_id_t & id)
 }
 
 static rmw_ret_t rmw_init_cs(
-  CddsCS * cs, const rmw_node_t * node,
+  CddsCS * cs, user_callback_data_t * cb_data,
+  const rmw_node_t * node,
   const rosidl_service_type_support_t * type_supports,
   const char * service_name, const rmw_qos_profile_t * qos_policies,
   bool is_service)
@@ -4271,6 +4572,9 @@ static rmw_ret_t rmw_init_cs(
 
   std::unique_ptr<rmw_cyclonedds_cpp::StructValueType> pub_msg_ts, sub_msg_ts;
 
+  dds_listener_t * listener = dds_create_listener(cb_data);
+  dds_lset_data_available_arg(listener, dds_listener_callback, cb_data, false);
+
   if (is_service) {
     std::tie(sub_msg_ts, pub_msg_ts) =
       rmw_cyclonedds_cpp::make_request_response_value_types(type_supports);
@@ -4306,7 +4610,7 @@ static rmw_ret_t rmw_init_cs(
   struct sertype_rmw * pub_st, * sub_st;
 
   pub_st = create_sertype(
-    pubtopic_name.c_str(), type_support->typesupport_identifier, pub_type_support, true,
+    type_support->typesupport_identifier, pub_type_support, true,
     std::move(pub_msg_ts));
   struct ddsi_sertype * pub_stact;
   pubtopic = create_topic(node->context->impl->ppant, pubtopic_name.c_str(), pub_st, &pub_stact);
@@ -4316,7 +4620,7 @@ static rmw_ret_t rmw_init_cs(
   }
 
   sub_st = create_sertype(
-    subtopic_name.c_str(), type_support->typesupport_identifier, sub_type_support, true,
+    type_support->typesupport_identifier, sub_type_support, true,
     std::move(sub_msg_ts));
   subtopic = create_topic(node->context->impl->ppant, subtopic_name.c_str(), sub_st);
   if (subtopic < 0) {
@@ -4328,10 +4632,6 @@ static rmw_ret_t rmw_init_cs(
   if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
     goto fail_qos;
   }
-  dds_reset_qos(qos);
-
-  dds_qset_reliability(qos, DDS_RELIABILITY_RELIABLE, DDS_SECS(1));
-  dds_qset_history(qos, DDS_HISTORY_KEEP_ALL, DDS_LENGTH_UNLIMITED);
 
   // store a unique identifier for this client/service in the user
   // data of the reader and writer so that we can always determine
@@ -4348,7 +4648,7 @@ static rmw_ret_t rmw_init_cs(
   }
   get_entity_gid(pub->enth, pub->gid);
   pub->sertype = pub_stact;
-  if ((sub->enth = dds_create_reader(node->context->impl->dds_sub, subtopic, qos, nullptr)) < 0) {
+  if ((sub->enth = dds_create_reader(node->context->impl->dds_sub, subtopic, qos, listener)) < 0) {
     RMW_SET_ERROR_MSG("failed to create reader");
     goto fail_reader;
   }
@@ -4361,6 +4661,7 @@ static rmw_ret_t rmw_init_cs(
     RMW_SET_ERROR_MSG("failed to get instance handle for writer");
     goto fail_instance_handle;
   }
+  dds_delete_listener(listener);
   dds_delete_qos(qos);
   dds_delete(subtopic);
   dds_delete(pubtopic);
@@ -4442,13 +4743,17 @@ extern "C" rmw_client_t * rmw_create_client(
   const char * service_name,
   const rmw_qos_profile_t * qos_policies)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos_policies, nullptr);
   CddsClient * info = new CddsClient();
 #if REPORT_BLOCKED_REQUESTS
   info->lastcheck = 0;
 #endif
+  rmw_qos_profile_t adapted_qos_policies =
+    rmw_dds_common::qos_profile_update_best_available_for_services(*qos_policies);
   if (
     rmw_init_cs(
-      &info->client, node, type_supports, service_name, qos_policies, false) != RMW_RET_OK)
+      &info->client, &info->user_callback_data,
+      node, type_supports, service_name, &adapted_qos_policies, false) != RMW_RET_OK)
   {
     delete (info);
     return nullptr;
@@ -4546,10 +4851,14 @@ extern "C" rmw_service_t * rmw_create_service(
   const char * service_name,
   const rmw_qos_profile_t * qos_policies)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos_policies, nullptr);
   CddsService * info = new CddsService();
+  rmw_qos_profile_t adapted_qos_policies =
+    rmw_dds_common::qos_profile_update_best_available_for_services(*qos_policies);
   if (
     rmw_init_cs(
-      &info->service, node, type_supports, service_name, qos_policies, true) != RMW_RET_OK)
+      &info->service, &info->user_callback_data,
+      node, type_supports, service_name, &adapted_qos_policies, true) != RMW_RET_OK)
   {
     delete (info);
     return nullptr;
@@ -4720,19 +5029,24 @@ extern "C" rmw_ret_t rmw_get_service_names_and_types(
 
 static rmw_ret_t get_topic_name(dds_entity_t endpoint_handle, std::string & name)
 {
-  /* dds_get_name needs a bit of TLC ... */
   std::vector<char> tmp(128);
-  do {
-    if (dds_get_name(dds_get_topic(endpoint_handle), tmp.data(), tmp.size()) < 0) {
-      return RMW_RET_ERROR;
-    }
-    auto end = std::find(tmp.begin(), tmp.end(), 0);
-    if (end != tmp.end()) {
-      name = std::string(tmp.begin(), end);
-      return RMW_RET_OK;
-    }
-    tmp.resize(2 * tmp.size());
-  } while (true);
+  dds_return_t rc = dds_get_name(dds_get_topic(endpoint_handle), tmp.data(), tmp.size());
+  if (rc > 0 && static_cast<size_t>(rc) >= tmp.size()) {
+    // topic name is too long for the buffer, but now we know how long it is
+    tmp.resize(static_cast<size_t>(rc) + 1);
+    rc = dds_get_name(dds_get_topic(endpoint_handle), tmp.data(), tmp.size());
+  }
+  if (rc < 0) {
+    return RMW_RET_ERROR;
+  } else if (static_cast<size_t>(rc) >= tmp.size()) {
+    // topic names can't change, so the topic must have been deleted and the
+    // handle reused for something with a longer name (which is exceedingly
+    // unlikely), and so it really is an error
+    return RMW_RET_ERROR;
+  }
+
+  name = std::string(tmp.begin(), tmp.begin() + rc);
+  return RMW_RET_OK;
 }
 
 static rmw_ret_t check_for_service_reader_writer(const CddsCS & client, bool * is_available)
@@ -5119,4 +5433,78 @@ extern "C" rmw_ret_t rmw_qos_profile_check_compatible(
 {
   return rmw_dds_common::qos_profile_check_compatible(
     publisher_profile, subscription_profile, compatibility, reason, reason_size);
+}
+
+extern "C" rmw_ret_t rmw_client_request_publisher_get_actual_qos(
+  const rmw_client_t * client,
+  rmw_qos_profile_t * qos)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(client, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos, RMW_RET_INVALID_ARGUMENT);
+
+  auto cli = static_cast<CddsClient *>(client->data);
+
+  if (get_readwrite_qos(cli->client.pub->enth, qos)) {
+    return RMW_RET_OK;
+  }
+
+  RMW_SET_ERROR_MSG("failed to get client's request publisher QoS");
+  return RMW_RET_ERROR;
+}
+
+extern "C" rmw_ret_t rmw_client_response_subscription_get_actual_qos(
+  const rmw_client_t * client,
+  rmw_qos_profile_t * qos)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(client, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos, RMW_RET_INVALID_ARGUMENT);
+
+  auto cli = static_cast<CddsClient *>(client->data);
+
+  if (get_readwrite_qos(cli->client.sub->enth, qos)) {
+    return RMW_RET_OK;
+  }
+
+  RMW_SET_ERROR_MSG("failed to get client's response subscription QoS");
+  return RMW_RET_ERROR;
+}
+
+extern "C" rmw_ret_t rmw_service_response_publisher_get_actual_qos(
+  const rmw_service_t * service,
+  rmw_qos_profile_t * qos)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(service, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos, RMW_RET_INVALID_ARGUMENT);
+
+  auto srv = static_cast<CddsService *>(service->data);
+
+  if (get_readwrite_qos(srv->service.pub->enth, qos)) {
+    return RMW_RET_OK;
+  }
+
+  RMW_SET_ERROR_MSG("failed to get service's response publisher QoS");
+  return RMW_RET_ERROR;
+}
+
+extern "C" rmw_ret_t rmw_service_request_subscription_get_actual_qos(
+  const rmw_service_t * service,
+  rmw_qos_profile_t * qos)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(service, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_ARGUMENT_FOR_NULL(qos, RMW_RET_INVALID_ARGUMENT);
+
+  auto srv = static_cast<CddsService *>(service->data);
+
+  if (get_readwrite_qos(srv->service.sub->enth, qos)) {
+    return RMW_RET_OK;
+  }
+
+  RMW_SET_ERROR_MSG("failed to get service's request subscription QoS");
+  return RMW_RET_ERROR;
+}
+
+extern "C" bool rmw_feature_supported(rmw_feature_t feature)
+{
+  (void)feature;
+  return false;
 }
