@@ -1,4 +1,4 @@
-From 695c4221ca855a62899792bfff1189b2b8239ce5 Mon Sep 17 00:00:00 2001
+From 7a50e907b5cb631d3a2aa54bf2a13ffd23951d5c Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Mon, 11 May 2020 12:10:25 -0700
 Subject: [PATCH 3/3] Add missing shlibdeps paths for GNUInstallDirs
