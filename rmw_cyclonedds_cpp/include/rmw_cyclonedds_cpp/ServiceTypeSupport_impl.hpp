@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SERVICETYPESUPPORT_IMPL_HPP_
-#define SERVICETYPESUPPORT_IMPL_HPP_
+#ifndef RMW_CYCLONEDDS_CPP__SERVICETYPESUPPORT_IMPL_HPP_
+#define RMW_CYCLONEDDS_CPP__SERVICETYPESUPPORT_IMPL_HPP_
 
 #include <cassert>
 #include <regex>
 #include <sstream>
 #include <string>
 
-#include "ServiceTypeSupport.hpp"
+#include "rmw_cyclonedds_cpp/ServiceTypeSupport.hpp"
 #include "rosidl_typesupport_introspection_cpp/field_types.hpp"
 
 namespace rmw_cyclonedds_cpp
@@ -72,4 +72,4 @@ ResponseTypeSupport<ServiceMembersType, MessageMembersType>::ResponseTypeSupport
 
 }  // namespace rmw_cyclonedds_cpp
 
-#endif  // SERVICETYPESUPPORT_IMPL_HPP_
+#endif  // RMW_CYCLONEDDS_CPP__SERVICETYPESUPPORT_IMPL_HPP_

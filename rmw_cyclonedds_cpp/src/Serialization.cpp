@@ -139,8 +139,8 @@ public:
     {
       size_t operator()(const CacheKey & k) const
       {
-        return std::hash<decltype(align)>{}(k.align) ^
-               ((std::hash<decltype(value_type)>{}(k.value_type)) << 1U);
+        return std::hash<decltype(align)>{} (k.align) ^
+               ((std::hash<decltype(value_type)>{} (k.value_type)) << 1U);
       }
     };
   };
@@ -357,10 +357,7 @@ protected:
   {
     align %= max_align;
 
-    // Value of 0 implies it is not a primitive, which should not happen and is checked elsewhere
-    const size_t cdr_alignof = get_cdr_alignof_primitive(v.type_kind());
-    assert(0 != cdr_alignof);
-    if (align % cdr_alignof != 0) {
+    if (align % get_cdr_alignof_primitive(v.type_kind()) != 0) {
       return false;
     }
     return v.sizeof_type() == get_cdr_size_of_primitive(v.type_kind());
