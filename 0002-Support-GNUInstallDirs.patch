@@ -1,4 +1,4 @@
-From e738ef38372df205558a47b80d194190c8317fb6 Mon Sep 17 00:00:00 2001
+From c74c4b8d64c546e2dcf4f71f4fb8c88ee65e6803 Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Tue, 5 May 2020 19:03:53 -0700
 Subject: [PATCH 2/3] Support GNUInstallDirs
