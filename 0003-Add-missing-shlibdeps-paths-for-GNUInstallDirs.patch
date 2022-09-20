@@ -1,4 +1,4 @@
-From 8694aa96fb108baf48d226504de2d43e8a76d086 Mon Sep 17 00:00:00 2001
+From 0c1927aeef31552df7d919ad8b657844dea23124 Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Mon, 11 May 2020 12:10:25 -0700
 Subject: [PATCH 3/3] Add missing shlibdeps paths for GNUInstallDirs
@@ -9,10 +9,10 @@ Signed-off-by: Jacob Perron <jacob@openrobotics.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/debian/rules.em b/debian/rules.em
-index 6a09f65..81858a8 100755
+index 6509080..6dbf9eb 100755
 --- a/debian/rules.em
 +++ b/debian/rules.em
-@@ -51,7 +51,7 @@ override_dh_shlibdeps:
+@@ -57,7 +57,7 @@ override_dh_shlibdeps:
  	# in the install tree and source it.  It will set things like
  	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
  	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
