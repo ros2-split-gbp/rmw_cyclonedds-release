@@ -545,6 +545,7 @@ extern "C" rmw_ret_t rmw_subscription_set_on_new_message_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_subscription, RMW_RET_INVALID_ARGUMENT);
   auto sub = static_cast<CddsSubscription *>(rmw_subscription->data);
 
   user_callback_data_t * data = &(sub->user_callback_data);
@@ -578,6 +579,7 @@ extern "C" rmw_ret_t rmw_service_set_on_new_request_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_service, RMW_RET_INVALID_ARGUMENT);
   auto srv = static_cast<CddsService *>(rmw_service->data);
 
   user_callback_data_t * data = &(srv->user_callback_data);
@@ -602,6 +604,7 @@ extern "C" rmw_ret_t rmw_client_set_on_new_response_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_client, RMW_RET_INVALID_ARGUMENT);
   auto cli = static_cast<CddsClient *>(rmw_client->data);
 
   user_callback_data_t * data = &(cli->user_callback_data);
@@ -648,6 +651,7 @@ extern "C" rmw_ret_t rmw_event_set_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
+  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_event, RMW_RET_INVALID_ARGUMENT);
   switch (rmw_event->event_type) {
     case RMW_EVENT_LIVELINESS_CHANGED:
       {
@@ -1787,23 +1791,24 @@ static dds_entity_t create_topic(dds_entity_t pp, const char * name, struct ddsi
   return tp;
 }
 
-void set_error_message_from_create_topic(dds_entity_t topic)
+void set_error_message_from_create_topic(dds_entity_t topic, const std::string & topic_name)
 {
   assert(topic < 0);
   if (DDS_RETCODE_BAD_PARAMETER == topic) {
-    RMW_SET_ERROR_MSG(
-      "failed to create topic because the function was given"
-      " invalid parameters");
+    const std::string error_msg = "failed to create topic [" + topic_name +
+      "] because the function was given invalid parameters";
+    RMW_SET_ERROR_MSG(error_msg.c_str());
   } else if (DDS_RETCODE_INCONSISTENT_POLICY == topic) {
-    RMW_SET_ERROR_MSG(
-      "failed to create topic because it's already in use"
-      " in this context with incompatible QoS settings");
+    const std::string error_msg = "failed to create topic [" + topic_name +
+      "] because it's already in use in this context with incompatible QoS settings";
+    RMW_SET_ERROR_MSG(error_msg.c_str());
   } else if (DDS_RETCODE_PRECONDITION_NOT_MET == topic) {
-    RMW_SET_ERROR_MSG(
-      "failed to create topic because it's already in use"
-      " in this context with a different message type");
+    const std::string error_msg = "failed to create topic [" + topic_name +
+      "] because it's already in use in this context with a different message type";
+    RMW_SET_ERROR_MSG(error_msg.c_str());
   } else {
-    RMW_SET_ERROR_MSG("failed to create topic for unknown reasons");
+    const std::string error_msg = "failed to create topic [" + topic_name + "] for unknown reasons";
+    RMW_SET_ERROR_MSG(error_msg.c_str());
   }
 }
 
@@ -2293,7 +2298,7 @@ static CddsPublisher * create_cdds_publisher(
   listener_set_event_callbacks(listener, &pub->user_callback_data);
 
   if (topic < 0) {
-    set_error_message_from_create_topic(topic);
+    set_error_message_from_create_topic(topic, fqtopic_name);
     goto fail_topic;
   }
   if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
@@ -2488,8 +2493,30 @@ extern "C" rmw_ret_t rmw_get_gid_for_publisher(const rmw_publisher_t * publisher
   auto pub = static_cast<const CddsPublisher *>(publisher->data);
   gid->implementation_identifier = eclipse_cyclonedds_identifier;
   memset(gid->data, 0, sizeof(gid->data));
-  assert(sizeof(pub->pubiid) <= sizeof(gid->data));
+  static_assert(
+    sizeof(pub->pubiid) <= sizeof(gid->data),
+    "publisher id is larger than max rmw gid size");
   memcpy(gid->data, &pub->pubiid, sizeof(pub->pubiid));
+  return RMW_RET_OK;
+}
+
+extern "C" rmw_ret_t rmw_get_gid_for_client(const rmw_client_t * client, rmw_gid_t * gid)
+{
+  RMW_CHECK_ARGUMENT_FOR_NULL(client, RMW_RET_INVALID_ARGUMENT);
+  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
+    client,
+    client->implementation_identifier,
+    eclipse_cyclonedds_identifier,
+    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
+  RMW_CHECK_ARGUMENT_FOR_NULL(gid, RMW_RET_INVALID_ARGUMENT);
+
+  const CddsClient * cli = static_cast<const CddsClient *>(client->data);
+  gid->implementation_identifier = eclipse_cyclonedds_identifier;
+  memset(gid->data, 0, sizeof(gid->data));
+  static_assert(
+    sizeof(cli->client.id.data) <= sizeof(gid->data),
+    "client id is larger than max rmw gid size");
+  memcpy(gid->data, cli->client.id.data, sizeof(cli->client.id.data));
   return RMW_RET_OK;
 }
 
@@ -2803,7 +2830,7 @@ static CddsSubscription * create_cdds_subscription(
   listener_set_event_callbacks(listener, &sub->user_callback_data);
 
   if (topic < 0) {
-    set_error_message_from_create_topic(topic);
+    set_error_message_from_create_topic(topic, fqtopic_name);
     goto fail_topic;
   }
   if ((qos = create_readwrite_qos(qos_policies, ignore_local_publications)) == nullptr) {
@@ -4635,7 +4662,7 @@ static rmw_ret_t rmw_init_cs(
   struct ddsi_sertype * pub_stact;
   pubtopic = create_topic(node->context->impl->ppant, pubtopic_name.c_str(), pub_st, &pub_stact);
   if (pubtopic < 0) {
-    set_error_message_from_create_topic(pubtopic);
+    set_error_message_from_create_topic(pubtopic, pubtopic_name);
     goto fail_pubtopic;
   }
 
@@ -4644,7 +4671,7 @@ static rmw_ret_t rmw_init_cs(
     std::move(sub_msg_ts));
   subtopic = create_topic(node->context->impl->ppant, subtopic_name.c_str(), sub_st);
   if (subtopic < 0) {
-    set_error_message_from_create_topic(subtopic);
+    set_error_message_from_create_topic(subtopic, subtopic_name);
     goto fail_subtopic;
   }
   // before proceeding to outright ignore given QoS policies, sanity check them
