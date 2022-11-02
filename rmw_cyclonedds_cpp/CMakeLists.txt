@@ -29,10 +29,20 @@ find_package(ament_cmake_ros REQUIRED)
 
 find_package(rcutils REQUIRED)
 find_package(rcpputils REQUIRED)
+find_package(tracetools REQUIRED)
 
 #find_package(cyclonedds_cmake_module REQUIRED)
 find_package(CycloneDDS QUIET CONFIG)
-if(NOT CycloneDDS_FOUND)
+if(CycloneDDS_FOUND)
+  # Support for shared memory in RMW depends on support for shared memory being compiled in
+  # Cyclone DDS and iceoryx_binding_c being available
+  get_target_property(_cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
+  if(_cyclonedds_has_shm)
+    find_package(iceoryx_binding_c REQUIRED)
+  else()
+    message(STATUS "Cyclone DDS is NOT compiled with support for shared memory")
+  endif()
+else()
   message(WARNING "Could not find Eclipse Cyclone DDS - skipping '${PROJECT_NAME}'")
   ament_package()
   return()
@@ -44,6 +54,10 @@ find_package(rosidl_runtime_c REQUIRED)
 find_package(rosidl_typesupport_introspection_c REQUIRED)
 find_package(rosidl_typesupport_introspection_cpp REQUIRED)
 
+if(_cyclonedds_has_shm)
+  ament_export_dependencies(iceoryx_binding_c)
+endif()
+ament_export_dependencies(CycloneDDS)
 ament_export_dependencies(rcutils)
 ament_export_dependencies(rcpputils)
 ament_export_dependencies(rmw)
@@ -51,8 +65,10 @@ ament_export_dependencies(rosidl_runtime_c)
 ament_export_dependencies(rmw_dds_common)
 ament_export_dependencies(rosidl_typesupport_introspection_c)
 ament_export_dependencies(rosidl_typesupport_introspection_cpp)
+ament_export_dependencies(tracetools)
 
 add_library(rmw_cyclonedds_cpp
+  src/rmw_get_network_flow_endpoints.cpp
   src/rmw_node.cpp
   src/serdata.cpp
   src/serdes.cpp
@@ -61,16 +77,27 @@ add_library(rmw_cyclonedds_cpp
   src/demangle.cpp
   src/deserialization_exception.cpp
   src/Serialization.cpp
-  src/TypeSupport2.cpp)
+  src/TypeSupport2.cpp
+  src/TypeSupport.cpp)
 
-target_include_directories(rmw_cyclonedds_cpp PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
+target_link_libraries(rmw_cyclonedds_cpp PRIVATE
+  CycloneDDS::ddsc)
 
-target_link_libraries(rmw_cyclonedds_cpp
-  CycloneDDS::ddsc
-)
+if(_cyclonedds_has_shm)
+  target_link_libraries(rmw_cyclonedds_cpp PRIVATE iceoryx_binding_c::iceoryx_binding_c)
+endif()
+
+target_link_libraries(rmw_cyclonedds_cpp PUBLIC
+  rmw::rmw)
+target_link_libraries(rmw_cyclonedds_cpp PRIVATE
+  rcutils::rcutils
+  rcpputils::rcpputils
+  rosidl_typesupport_introspection_c::rosidl_typesupport_introspection_c
+  rosidl_typesupport_introspection_cpp::rosidl_typesupport_introspection_cpp
+  rmw_dds_common::rmw_dds_common_library
+  rosidl_runtime_c::rosidl_runtime_c
+  tracetools::tracetools)
+
 if(CMAKE_GENERATOR_PLATFORM)
   set(TARGET_ARCH "${CMAKE_GENERATOR_PLATFORM}")
 else()
@@ -79,19 +106,8 @@ endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX AND TARGET_ARCH MATCHES "^(riscv|RISCV)64$")
   # using GCC, libatomic is not automatically linked for RISC-V
-  target_link_libraries(rmw_cyclonedds_cpp -latomic)
+  target_link_libraries(rmw_cyclonedds_cpp PUBLIC -latomic)
 endif()
-
-
-ament_target_dependencies(rmw_cyclonedds_cpp
-  "rcutils"
-  "rcpputils"
-  "rosidl_typesupport_introspection_c"
-  "rosidl_typesupport_introspection_cpp"
-  "rmw"
-  "rmw_dds_common"
-  "rosidl_runtime_c"
-)
 
 configure_rmw_library(rmw_cyclonedds_cpp)
 
@@ -102,13 +118,7 @@ target_compile_definitions(${PROJECT_NAME}
     RMW_VERSION_PATCH=${rmw_VERSION_PATCH}
 )
 
-# Causes the visibility macros to use dllexport rather than dllimport,
-# which is appropriate when building the dll but not consuming it.
-target_compile_definitions(${PROJECT_NAME}
-  PRIVATE "RMW_CYCLONEDDS_CPP_BUILDING_LIBRARY")
-
-ament_export_include_directories(include)
-ament_export_libraries(rmw_cyclonedds_cpp)
+ament_export_targets(export_rmw_cyclonedds_cpp)
 
 register_rmw_implementation(
   "c:rosidl_typesupport_c:rosidl_typesupport_introspection_c"
@@ -122,12 +132,8 @@ endif()
 ament_package()
 
 install(
-  DIRECTORY include/
-  DESTINATION include
-)
-
-install(
   TARGETS rmw_cyclonedds_cpp
+  EXPORT export_rmw_cyclonedds_cpp
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
