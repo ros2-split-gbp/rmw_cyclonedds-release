@@ -545,7 +545,6 @@ extern "C" rmw_ret_t rmw_subscription_set_on_new_message_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_subscription, RMW_RET_INVALID_ARGUMENT);
   auto sub = static_cast<CddsSubscription *>(rmw_subscription->data);
 
   user_callback_data_t * data = &(sub->user_callback_data);
@@ -579,7 +578,6 @@ extern "C" rmw_ret_t rmw_service_set_on_new_request_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_service, RMW_RET_INVALID_ARGUMENT);
   auto srv = static_cast<CddsService *>(rmw_service->data);
 
   user_callback_data_t * data = &(srv->user_callback_data);
@@ -604,7 +602,6 @@ extern "C" rmw_ret_t rmw_client_set_on_new_response_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_client, RMW_RET_INVALID_ARGUMENT);
   auto cli = static_cast<CddsClient *>(rmw_client->data);
 
   user_callback_data_t * data = &(cli->user_callback_data);
@@ -651,7 +648,6 @@ extern "C" rmw_ret_t rmw_event_set_callback(
   rmw_event_callback_t callback,
   const void * user_data)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(rmw_event, RMW_RET_INVALID_ARGUMENT);
   switch (rmw_event->event_type) {
     case RMW_EVENT_LIVELINESS_CHANGED:
       {
@@ -2427,13 +2423,6 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
       return nullptr;
     }
   }
-  // Adapt any 'best available' QoS options
-  rmw_qos_profile_t adapted_qos_policies = *qos_policies;
-  rmw_ret_t ret = rmw_dds_common::qos_profile_get_best_available_for_topic_publisher(
-    node, topic_name, &adapted_qos_policies, rmw_get_subscriptions_info_by_topic);
-  if (RMW_RET_OK != ret) {
-    return nullptr;
-  }
   RMW_CHECK_ARGUMENT_FOR_NULL(publisher_options, nullptr);
   if (publisher_options->require_unique_network_flow_endpoints ==
     RMW_UNIQUE_NETWORK_FLOW_ENDPOINTS_STRICTLY_REQUIRED)
@@ -2445,7 +2434,7 @@ extern "C" rmw_publisher_t * rmw_create_publisher(
 
   rmw_publisher_t * pub = create_publisher(
     node->context->impl->ppant, node->context->impl->dds_pub,
-    type_supports, topic_name, &adapted_qos_policies,
+    type_supports, topic_name, qos_policies,
     publisher_options);
   if (pub == nullptr) {
     return nullptr;
@@ -2493,30 +2482,8 @@ extern "C" rmw_ret_t rmw_get_gid_for_publisher(const rmw_publisher_t * publisher
   auto pub = static_cast<const CddsPublisher *>(publisher->data);
   gid->implementation_identifier = eclipse_cyclonedds_identifier;
   memset(gid->data, 0, sizeof(gid->data));
-  static_assert(
-    sizeof(pub->pubiid) <= sizeof(gid->data),
-    "publisher id is larger than max rmw gid size");
+  assert(sizeof(pub->pubiid) <= sizeof(gid->data));
   memcpy(gid->data, &pub->pubiid, sizeof(pub->pubiid));
-  return RMW_RET_OK;
-}
-
-extern "C" rmw_ret_t rmw_get_gid_for_client(const rmw_client_t * client, rmw_gid_t * gid)
-{
-  RMW_CHECK_ARGUMENT_FOR_NULL(client, RMW_RET_INVALID_ARGUMENT);
-  RMW_CHECK_TYPE_IDENTIFIERS_MATCH(
-    client,
-    client->implementation_identifier,
-    eclipse_cyclonedds_identifier,
-    return RMW_RET_INCORRECT_RMW_IMPLEMENTATION);
-  RMW_CHECK_ARGUMENT_FOR_NULL(gid, RMW_RET_INVALID_ARGUMENT);
-
-  const CddsClient * cli = static_cast<const CddsClient *>(client->data);
-  gid->implementation_identifier = eclipse_cyclonedds_identifier;
-  memset(gid->data, 0, sizeof(gid->data));
-  static_assert(
-    sizeof(cli->client.id.data) <= sizeof(gid->data),
-    "client id is larger than max rmw gid size");
-  memcpy(gid->data, cli->client.id.data, sizeof(cli->client.id.data));
   return RMW_RET_OK;
 }
 
@@ -2964,13 +2931,6 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
       return nullptr;
     }
   }
-  // Adapt any 'best available' QoS options
-  rmw_qos_profile_t adapted_qos_policies = *qos_policies;
-  rmw_ret_t ret = rmw_dds_common::qos_profile_get_best_available_for_topic_subscription(
-    node, topic_name, &adapted_qos_policies, rmw_get_publishers_info_by_topic);
-  if (RMW_RET_OK != ret) {
-    return nullptr;
-  }
   RMW_CHECK_ARGUMENT_FOR_NULL(subscription_options, nullptr);
   if (subscription_options->require_unique_network_flow_endpoints ==
     RMW_UNIQUE_NETWORK_FLOW_ENDPOINTS_STRICTLY_REQUIRED)
@@ -2982,7 +2942,7 @@ extern "C" rmw_subscription_t * rmw_create_subscription(
 
   rmw_subscription_t * sub = create_subscription(
     node->context->impl->ppant, node->context->impl->dds_sub,
-    type_supports, topic_name, &adapted_qos_policies,
+    type_supports, topic_name, qos_policies,
     subscription_options);
   if (sub == nullptr) {
     return nullptr;
@@ -3260,7 +3220,7 @@ static rmw_ret_t rmw_take_seq(
 
   if (count > (std::numeric_limits<uint32_t>::max)()) {
     RMW_SET_ERROR_MSG_WITH_FORMAT_STRING(
-      "Cannot take %zu samples at once, limit is %" PRIu32,
+      "Cannot take %zu samples at once, limit is %d",
       count, (std::numeric_limits<uint32_t>::max)());
     return RMW_RET_ERROR;
   }
@@ -4790,17 +4750,14 @@ extern "C" rmw_client_t * rmw_create_client(
   const char * service_name,
   const rmw_qos_profile_t * qos_policies)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(qos_policies, nullptr);
   CddsClient * info = new CddsClient();
 #if REPORT_BLOCKED_REQUESTS
   info->lastcheck = 0;
 #endif
-  rmw_qos_profile_t adapted_qos_policies =
-    rmw_dds_common::qos_profile_update_best_available_for_services(*qos_policies);
   if (
     rmw_init_cs(
       &info->client, &info->user_callback_data,
-      node, type_supports, service_name, &adapted_qos_policies, false) != RMW_RET_OK)
+      node, type_supports, service_name, qos_policies, false) != RMW_RET_OK)
   {
     delete (info);
     return nullptr;
@@ -4898,14 +4855,11 @@ extern "C" rmw_service_t * rmw_create_service(
   const char * service_name,
   const rmw_qos_profile_t * qos_policies)
 {
-  RMW_CHECK_ARGUMENT_FOR_NULL(qos_policies, nullptr);
   CddsService * info = new CddsService();
-  rmw_qos_profile_t adapted_qos_policies =
-    rmw_dds_common::qos_profile_update_best_available_for_services(*qos_policies);
   if (
     rmw_init_cs(
       &info->service, &info->user_callback_data,
-      node, type_supports, service_name, &adapted_qos_policies, true) != RMW_RET_OK)
+      node, type_supports, service_name, qos_policies, true) != RMW_RET_OK)
   {
     delete (info);
     return nullptr;

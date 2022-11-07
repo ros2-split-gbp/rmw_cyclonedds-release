@@ -2,26 +2,15 @@
 Changelog for package rmw_cyclonedds_cpp
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.5.0 (2022-11-02)
+1.3.4 (2022-11-07)
 ------------------
-* Export CycloneDDS dependency (`#424 <https://github.com/ros2/rmw_cyclonedds/issues/424>`_)
-* add NULL check before accessing object. (`#423 <https://github.com/ros2/rmw_cyclonedds/issues/423>`_)
-* Add rmw_get_gid_for_client impl (`#402 <https://github.com/ros2/rmw_cyclonedds/issues/402>`_)
+* Export CycloneDDS dependency (`#424 <https://github.com/ros2/rmw_cyclonedds/issues/424>`_) (`#425 <https://github.com/ros2/rmw_cyclonedds/issues/425>`_)
+* Merge pull request `#420 <https://github.com/ros2/rmw_cyclonedds/issues/420>`_ from ros2/mergify/bp/humble/pr-410
 * Makes topic_name a const ref
 * Adds topic name to error msg when create_topic fails
-* Contributors: Brian, Shane Loretz, Tomoya Fujita, Tully Foote, Voldivh
-
-1.4.1 (2022-09-13)
-------------------
-* Improve error message when create_topic fails (`#405 <https://github.com/ros2/rmw_cyclonedds/issues/405>`_)
-* Change wrong use of %d to print uint32_t to PRIu32 (`#253 <https://github.com/ros2/rmw_cyclonedds/issues/253>`_)
-* Add cstring include. (`#393 <https://github.com/ros2/rmw_cyclonedds/issues/393>`_)
-* Contributors: Chris Lalancette, Shane Loretz, eboasson
-
-1.4.0 (2022-05-03)
-------------------
-* Handle 'best_available' QoS policies (`#389 <https://github.com/ros2/rmw_cyclonedds/issues/389>`_)
-* Contributors: Jose Luis Rivero
+* Improve error message when create_topic fails (`#405 <https://github.com/ros2/rmw_cyclonedds/issues/405>`_) (`#406 <https://github.com/ros2/rmw_cyclonedds/issues/406>`_)
+* [Fix] Add cstring header for memset (`#398 <https://github.com/ros2/rmw_cyclonedds/issues/398>`_)
+* Contributors: Homalozoa X, Tully Foote, Voldivh, mergify[bot]
 
 1.3.3 (2022-04-06)
 ------------------
