@@ -2,104 +2,28 @@
 Changelog for package rmw_cyclonedds_cpp
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.3.4 (2022-11-07)
-------------------
-* Export CycloneDDS dependency (`#424 <https://github.com/ros2/rmw_cyclonedds/issues/424>`_) (`#425 <https://github.com/ros2/rmw_cyclonedds/issues/425>`_)
-* Merge pull request `#420 <https://github.com/ros2/rmw_cyclonedds/issues/420>`_ from ros2/mergify/bp/humble/pr-410
-* Makes topic_name a const ref
-* Adds topic name to error msg when create_topic fails
-* Improve error message when create_topic fails (`#405 <https://github.com/ros2/rmw_cyclonedds/issues/405>`_) (`#406 <https://github.com/ros2/rmw_cyclonedds/issues/406>`_)
-* [Fix] Add cstring header for memset (`#398 <https://github.com/ros2/rmw_cyclonedds/issues/398>`_)
-* Contributors: Homalozoa X, Tully Foote, Voldivh, mergify[bot]
+0.22.6 (2022-12-02)
+-------------------
+* Handle allocation errors during message deserialization (`#418 <https://github.com/ros2/rmw_cyclonedds/issues/418>`_)
+* Adds topic name to error msg when create_topic fails (`#421 <https://github.com/ros2/rmw_cyclonedds/issues/421>`_)
+* Improve error message when create_topic fails (`#407 <https://github.com/ros2/rmw_cyclonedds/issues/407>`_)
+* Contributors: Jacob Perron, Michel Hidalgo, Shane Loretz, Voldivh
 
-1.3.3 (2022-04-06)
-------------------
-* Fix get_topic_name and handling long service names
-* Contributors: Erik Boasson
-
-1.3.2 (2022-04-05)
-------------------
-* Add serialization for SDK_DATA
-* Additional checks for loan API
-* Contributors: Dietrich Krönke
-
-1.3.1 (2022-03-31)
-------------------
-* Depend on just rmw_dds_common::rmw_dds_common_library (`#385 <https://github.com/ros2/rmw_cyclonedds/issues/385>`_)
-* Contributors: Shane Loretz
-
-1.3.0 (2022-03-25)
-------------------
-* Fix error message in rmw_init_options_copy(). (`#380 <https://github.com/ros2/rmw_cyclonedds/issues/380>`_)
-* Add content filter topic feature empty stub. (`#289 <https://github.com/ros2/rmw_cyclonedds/issues/289>`_)
-* Update to work with Cyclone 0.9.0 and Iceoryx 2.0 (`#379 <https://github.com/ros2/rmw_cyclonedds/issues/379>`_)
-* Fill message info sequence numbers as unsupported, add rmw_feature_supported() implementation. (`#381 <https://github.com/ros2/rmw_cyclonedds/issues/381>`_)
-* Contributors: Chen Lihui, Haowei Wen, Ivan Santiago Paunovic, Sumanth Nirmal
-
-1.2.0 (2022-03-01)
-------------------
-* Fix a warning by making a pointer nullptr. (`#375 <https://github.com/ros2/rmw_cyclonedds/issues/375>`_)
-* Bump QDs to QL2 (`#371 <https://github.com/ros2/rmw_cyclonedds/issues/371>`_)
-* Add EventsExecutor (`#256 <https://github.com/ros2/rmw_cyclonedds/issues/256>`_)
-* Call dissociate_reader in rmw_destroy_subscription
-* Wrap creation of new serdata_rmw within a try-catch block
-* Fix memory leak in error scenario on the publish side with SHM
-* Fix memory leaks on the take side with SHM
-* rename _cyclonedds_has_shm to follow the convention
-* Add iceoryx_binding_c as dependency to rmw_cyclonedds_cpp
-* Release iox_chunk to iceoryx in serdata_free if the iox_chunk is still available
-* Update iceoryx_subscriber also when constructing the serdata from the iox chunk
-* Contributors: Chris Lalancette, Christophe Bedard, Erik Boasson, Sumanth Nirmal, iRobot ROS
-
-1.1.2 (2022-01-14)
-------------------
-* Fix cpplint errors (`#363 <https://github.com/ros2/rmw_cyclonedds/issues/363>`_)
+0.22.5 (2022-04-28)
+-------------------
+* Free with the same allocator in rmw_destroy_node (`#355 <https://github.com/ros2/rmw_cyclonedds/issues/355>`_) (`#368 <https://github.com/ros2/rmw_cyclonedds/issues/368>`_)
 * Contributors: Jacob Perron
 
-1.1.1 (2021-12-17)
-------------------
-* Updates for uncrustify 0.72 (`#358 <https://github.com/ros2/rmw_cyclonedds/issues/358>`_)
-* Export only rmw::rmw to downstream targets (`#360 <https://github.com/ros2/rmw_cyclonedds/issues/360>`_)
-* Export modern CMake targets (`#357 <https://github.com/ros2/rmw_cyclonedds/issues/357>`_)
-* Free with the same allocator in rmw_destroy_node (`#355 <https://github.com/ros2/rmw_cyclonedds/issues/355>`_)
-* Contributors: Chris Lalancette, Jacob Perron, Shane Loretz
-
-1.1.0 (2021-11-19)
-------------------
-* Add client/service QoS getters. (`#343 <https://github.com/ros2/rmw_cyclonedds/issues/343>`_)
-* Updated version number and quality level. (`#349 <https://github.com/ros2/rmw_cyclonedds/issues/349>`_)
-* Update package maintainers. (`#351 <https://github.com/ros2/rmw_cyclonedds/issues/351>`_)
-* Contributors: Joe Speed, Michel Hidalgo, mauropasse
-
-1.0.0 (2021-10-25)
-------------------
-* Fix undesired memory initialization in zero-copy data path. (`#348 <https://github.com/ros2/rmw_cyclonedds/issues/348>`_)
-* Fix QoS depth settings for clients/service being ignored. (`#340 <https://github.com/ros2/rmw_cyclonedds/issues/340>`_)
-* Link to Cyclone DDS in Quality Declaration. (`#342 <https://github.com/ros2/rmw_cyclonedds/issues/342>`_)
-* Contributors: Chen Lihui, Erik Boasson, Joe Speed, Sumanth Nirmal
-
-0.24.0 (2021-09-15)
+0.22.4 (2021-12-22)
 -------------------
-* Update rmw_context_impl_t definition (`#337 <https://github.com/ros2/rmw_cyclonedds/issues/337>`_)
-* Add quality declaration for rmw_cyclonedds_cpp (`#335 <https://github.com/ros2/rmw_cyclonedds/issues/335>`_)
-* Fix use of deprecated is_loan_available (`#336 <https://github.com/ros2/rmw_cyclonedds/issues/336>`_)
-* Add -latomic for RISC-V (`#332 <https://github.com/ros2/rmw_cyclonedds/issues/332>`_)
-* Add pub/sub init, publish and take instrumentation using tracetools (`#329 <https://github.com/ros2/rmw_cyclonedds/issues/329>`_)
-* Pass the CRL down to CycloneDDS if it exists (`#325 <https://github.com/ros2/rmw_cyclonedds/issues/325>`_)
-* Use the new rmw_dds_common::get_security_files API (`#323 <https://github.com/ros2/rmw_cyclonedds/issues/323>`_)
-* Contributors: Chris Lalancette, Christophe Bedard, Michel Hidalgo, eboasson, guillaume-pais-siemens
+* Fix use of deprecated is_loan_available (`#359 <https://github.com/ros2/rmw_cyclonedds/issues/359>`_)
+* rmw_cyclonedds_cpp/CMakeLists.txt: add -latomic for RISC-V (`#334 <https://github.com/ros2/rmw_cyclonedds/issues/334>`_)
+* Contributors: eboasson, guillaume-pais-siemens
 
-0.23.1 (2021-06-16)
+0.22.3 (2021-06-17)
 -------------------
-* Add rmw_publisher_wait_for_all_acked support. (`#294 <https://github.com/ros2/rmw_cyclonedds/issues/294>`_)
-* Contributors: Barry Xu
-
-0.23.0 (2021-06-07)
--------------------
-* Fix zero copy issues. (`#309 <https://github.com/ros2/rmw_cyclonedds/issues/309>`_)
-* Handle allocation errors during message deserialization. (`#313 <https://github.com/ros2/rmw_cyclonedds/issues/313>`_)
-* Update includes after rcutils/get_env.h deprecation. (`#312 <https://github.com/ros2/rmw_cyclonedds/issues/312>`_)
-* Contributors: Christophe Bedard, Michel Hidalgo, Sumanth Nirmal
+* Update Galactic to support zero-copy. (`#321 <https://github.com/ros2/rmw_cyclonedds/issues/321>`_)
+* Contributors: eboasson
 
 0.22.2 (2021-04-26)
 -------------------

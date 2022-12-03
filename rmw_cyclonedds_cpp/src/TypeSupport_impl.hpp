@@ -23,7 +23,6 @@
 
 #include "TypeSupport.hpp"
 #include "macros.hpp"
-#include "rmw/error_handling.h"
 #include "rosidl_typesupport_introspection_cpp/field_types.hpp"
 #include "rosidl_typesupport_introspection_cpp/message_introspection.hpp"
 #include "rosidl_typesupport_introspection_cpp/service_introspection.hpp"
