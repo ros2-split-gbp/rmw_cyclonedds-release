@@ -1,4 +1,4 @@
-From ae03c64394c77dfc9fd31547d40134414065506c Mon Sep 17 00:00:00 2001
+From 21e829855b555c1605c473dd6a0241f2b8e38af1 Mon Sep 17 00:00:00 2001
 From: Jacob Perron <jacob@openrobotics.org>
 Date: Tue, 5 May 2020 18:19:45 -0700
 Subject: [PATCH] Tell shlibdeps where to find cyclonedds libraries
@@ -12,10 +12,10 @@ Signed-off-by: Jacob Perron <jacob@openrobotics.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/debian/rules.em b/debian/rules.em
-index 5a04067..81858a8 100755
+index 2ab7b14..6dbf9eb 100755
 --- a/debian/rules.em
 +++ b/debian/rules.em
-@@ -51,7 +51,7 @@ override_dh_shlibdeps:
+@@ -57,7 +57,7 @@ override_dh_shlibdeps:
  	# in the install tree and source it.  It will set things like
  	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
  	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
@@ -25,5 +25,5 @@ index 5a04067..81858a8 100755
  override_dh_auto_install:
  	# In case we're installing to a non-standard location, look for a setup.sh
 -- 
-2.25.1
+2.38.1
 
