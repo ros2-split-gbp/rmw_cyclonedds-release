@@ -32,14 +32,17 @@
 #include <regex>
 #include <limits>
 
+#include "rcutils/allocator.h"
 #include "rcutils/env.h"
 #include "rcutils/filesystem.h"
 #include "rcutils/format_string.h"
 #include "rcutils/logging_macros.h"
+#include "rcutils/process.h"
 #include "rcutils/strdup.h"
 
 #include "rmw/allocators.h"
 #include "rmw/convert_rcutils_ret_to_rmw_ret.h"
+#include "rmw/discovery_options.h"
 #include "rmw/error_handling.h"
 #include "rmw/event.h"
 #include "rmw/features.h"
@@ -74,6 +77,8 @@
 #include "rmw_dds_common/msg/participant_entities_info.hpp"
 #include "rmw_dds_common/qos.hpp"
 #include "rmw_dds_common/security.hpp"
+
+#include "rosidl_runtime_c/type_hash.h"
 
 #include "rosidl_typesupport_cpp/message_type_support.hpp"
 
@@ -255,7 +260,7 @@ struct CddsDomain
      There are a few issues with the current support for creating domains explicitly in
      Cyclone, fixing those might relax alter or relax some of the above. */
 
-  bool localhost_only;
+  rmw_discovery_options_t discovery_options;
   uint32_t refcount;
 
   /* handle of the domain entity */
@@ -263,8 +268,10 @@ struct CddsDomain
 
   /* Default constructor so operator[] can be safely be used to look one up */
   CddsDomain()
-  : localhost_only(false), refcount(0), domain_handle(0)
-  {}
+  : refcount(0), domain_handle(0)
+  {
+    discovery_options = rmw_get_zero_initialized_discovery_options();
+  }
 
   ~CddsDomain()
   {}
@@ -515,6 +522,9 @@ MAKE_DDS_EVENT_CALLBACK_FN(requested_incompatible_qos, REQUESTED_INCOMPATIBLE_QO
 MAKE_DDS_EVENT_CALLBACK_FN(sample_lost, SAMPLE_LOST)
 MAKE_DDS_EVENT_CALLBACK_FN(offered_incompatible_qos, OFFERED_INCOMPATIBLE_QOS)
 MAKE_DDS_EVENT_CALLBACK_FN(liveliness_changed, LIVELINESS_CHANGED)
+MAKE_DDS_EVENT_CALLBACK_FN(inconsistent_topic, INCONSISTENT_TOPIC)
+MAKE_DDS_EVENT_CALLBACK_FN(subscription_matched, SUBSCRIPTION_MATCHED)
+MAKE_DDS_EVENT_CALLBACK_FN(publication_matched, PUBLICATION_MATCHED)
 
 static void listener_set_event_callbacks(dds_listener_t * l, void * arg)
 {
@@ -525,6 +535,9 @@ static void listener_set_event_callbacks(dds_listener_t * l, void * arg)
   dds_lset_offered_deadline_missed_arg(l, on_offered_deadline_missed_fn, arg, false);
   dds_lset_offered_incompatible_qos_arg(l, on_offered_incompatible_qos_fn, arg, false);
   dds_lset_liveliness_changed_arg(l, on_liveliness_changed_fn, arg, false);
+  dds_lset_inconsistent_topic_arg(l, on_inconsistent_topic_fn, arg, false);
+  dds_lset_subscription_matched_arg(l, on_subscription_matched_fn, arg, false);
+  dds_lset_publication_matched_arg(l, on_publication_matched_fn, arg, false);
 }
 
 static bool get_readwrite_qos(dds_entity_t handle, rmw_qos_profile_t * rmw_qos_policies)
@@ -689,6 +702,15 @@ extern "C" rmw_ret_t rmw_event_set_callback(
         break;
       }
 
+    case RMW_EVENT_SUBSCRIPTION_MATCHED:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_SUBSCRIPTION_MATCHED_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
     case RMW_EVENT_LIVELINESS_LOST:
       {
         auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
@@ -716,6 +738,33 @@ extern "C" rmw_ret_t rmw_event_set_callback(
         break;
       }
 
+    case RMW_EVENT_PUBLISHER_INCOMPATIBLE_TYPE:
+      {
+        auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
+        event_set_callback(
+          pub_event, DDS_INCONSISTENT_TOPIC_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_SUBSCRIPTION_INCOMPATIBLE_TYPE:
+      {
+        auto sub_event = static_cast<CddsSubscription *>(rmw_event->data);
+        event_set_callback(
+          sub_event, DDS_INCONSISTENT_TOPIC_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
+    case RMW_EVENT_PUBLICATION_MATCHED:
+      {
+        auto pub_event = static_cast<CddsPublisher *>(rmw_event->data);
+        event_set_callback(
+          pub_event, DDS_PUBLICATION_MATCHED_STATUS_ID,
+          callback, user_data);
+        break;
+      }
+
     case RMW_EVENT_INVALID:
       {
         return RMW_RET_INVALID_ARGUMENT;
@@ -739,10 +788,11 @@ extern "C" rmw_ret_t rmw_init_options_init(
   init_options->allocator = allocator;
   init_options->impl = nullptr;
   init_options->localhost_only = RMW_LOCALHOST_ONLY_DEFAULT;
+  init_options->discovery_options = rmw_get_zero_initialized_discovery_options(),
   init_options->domain_id = RMW_DEFAULT_DOMAIN_ID;
   init_options->enclave = NULL;
   init_options->security_options = rmw_get_zero_initialized_security_options();
-  return RMW_RET_OK;
+  return rmw_discovery_options_init(&(init_options->discovery_options), 0, &allocator);
 }
 
 extern "C" rmw_ret_t rmw_init_options_copy(const rmw_init_options_t * src, rmw_init_options_t * dst)
@@ -896,10 +946,29 @@ static void handle_builtintopic_endpoint(
       rmw_gid_t ppgid;
       dds_qos_to_rmw_qos(s->qos, &qos_profile);
       convert_guid_to_gid(s->participant_key, ppgid);
+
+      rosidl_type_hash_t type_hash = rosidl_get_zero_initialized_type_hash();
+      void * userdata;
+      size_t userdata_size;
+      if (dds_qget_userdata(s->qos, &userdata, &userdata_size)) {
+        RCPPUTILS_SCOPE_EXIT(dds_free(userdata));
+        if (RMW_RET_OK != rmw_dds_common::parse_type_hash_from_user_data(
+            reinterpret_cast<const uint8_t *>(userdata), userdata_size, type_hash))
+        {
+          RCUTILS_LOG_WARN_NAMED(
+            "rmw_cyclonedds_cpp",
+            "Failed to parse type hash for topic '%s' with type '%s' from USER_DATA '%*s'.",
+            s->topic_name, s->type_name,
+            static_cast<int>(userdata_size), reinterpret_cast<char *>(userdata));
+          type_hash = rosidl_get_zero_initialized_type_hash();
+        }
+      }
+
       impl->common.graph_cache.add_entity(
         gid,
         std::string(s->topic_name),
         std::string(s->type_name),
+        type_hash,
         ppgid,
         qos_profile,
         is_reader);
@@ -1030,39 +1099,147 @@ static rmw_ret_t discovery_thread_stop(rmw_dds_common::Context & common_context)
   return RMW_RET_OK;
 }
 
-static bool check_create_domain(dds_domainid_t did, rmw_localhost_only_t localhost_only_option)
+static bool check_create_domain(dds_domainid_t did, rmw_discovery_options_t * discovery_options)
 {
-  const bool localhost_only = (localhost_only_option == RMW_LOCALHOST_ONLY_ENABLED);
   std::lock_guard<std::mutex> lock(gcdds().domains_lock);
-  /* return true: n_nodes incremented, localhost_only set correctly, domain exists
+  /* return true: n_nodes incremented, discovery params set correctly, domain exists
      "      false: n_nodes unchanged, domain left intact if it already existed */
   CddsDomain & dom = gcdds().domains[did];
   if (dom.refcount != 0) {
-    /* Localhost setting must match */
-    if (localhost_only == dom.localhost_only) {
+    /* Discovery parameters must match */
+    bool options_equal = false;
+    const auto rc =
+      rmw_discovery_options_equal(discovery_options, &dom.discovery_options, &options_equal);
+    if (RMW_RET_OK != rc) {
+      RCUTILS_LOG_ERROR_NAMED(
+        "rmw_cyclonedds_cpp",
+        "check_create_domain: unable to check if discovery options are equal: %i",
+        rc);
+      return false;
+    }
+    if (options_equal) {
       dom.refcount++;
       return true;
     } else {
       RCUTILS_LOG_ERROR_NAMED(
         "rmw_cyclonedds_cpp",
-        "rmw_create_node: attempt at creating localhost-only and non-localhost-only nodes "
-        "in the same domain");
+        "check_create_domain: attempt at creating nodes in the same domain with different "
+        "discovery parameters");
       return false;
     }
   } else {
     dom.refcount = 1;
-    dom.localhost_only = localhost_only;
+    dom.discovery_options = *discovery_options;
 
-    /* Localhost-only: set network interface address (shortened form of config would be
-       possible, too, but I think it is clearer to spell it out completely).  Empty
-       configuration fragments are ignored, so it is safe to unconditionally append a
-       comma. */
-    std::string config =
-      localhost_only ?
-      "<CycloneDDS><Domain><General><Interfaces><NetworkInterface address=\"127.0.0.1\"/>"
-      "</Interfaces></General></Domain></CycloneDDS>,"
-      :
-      "";
+    bool add_localhost_as_static_peer;
+    bool add_static_peers;
+    bool disable_multicast;
+
+    switch (discovery_options->automatic_discovery_range) {
+      case RMW_AUTOMATIC_DISCOVERY_RANGE_NOT_SET:
+        RMW_SET_ERROR_MSG("automatic discovery range must be set");
+        return false;
+        break;
+      case RMW_AUTOMATIC_DISCOVERY_RANGE_SUBNET:
+        add_localhost_as_static_peer = false;
+        add_static_peers = true;
+        disable_multicast = false;
+        break;
+      case RMW_AUTOMATIC_DISCOVERY_RANGE_SYSTEM_DEFAULT:
+        /* Avoid changing DDS discovery options*/
+        add_localhost_as_static_peer = false;
+        add_static_peers = false;
+        disable_multicast = false;
+        if (discovery_options->static_peers_count > 0) {
+          RCUTILS_LOG_WARN_NAMED(
+            "rmw_cyclonedds_cpp",
+            "check_create_domain: %lu static peers were specified, but discovery is "
+            "set to use the RMW implementation default, so these static peers will be ignored.",
+            discovery_options->static_peers_count);
+        }
+        break;
+      case RMW_AUTOMATIC_DISCOVERY_RANGE_LOCALHOST:
+        /* Automatic discovery on localhost only */
+        add_localhost_as_static_peer = true;
+        add_static_peers = true;
+        disable_multicast = true;
+        break;
+      case RMW_AUTOMATIC_DISCOVERY_RANGE_OFF:
+        /* Automatic discovery off: disable multicast entirely. */
+        add_localhost_as_static_peer = false;
+        add_static_peers = false;
+        disable_multicast = true;
+        if (discovery_options->static_peers_count > 0) {
+          RCUTILS_LOG_WARN_NAMED(
+            "rmw_cyclonedds_cpp",
+            "check_create_domain: %lu static peers were specified, but discovery is "
+            "turned off, so these static peers will be ignored.",
+            discovery_options->static_peers_count);
+        }
+        break;
+      default:
+        RMW_SET_ERROR_MSG("automatic_discovery_range is an unknown value");
+        return false;
+        break;
+    }
+
+    std::string config;
+    if (
+      add_localhost_as_static_peer ||
+      add_static_peers ||
+      disable_multicast)
+    {
+      config = "<CycloneDDS><Domain>";
+
+      if (disable_multicast) {
+        config += "<General><AllowMulticast>false</AllowMulticast></General>";
+      }
+
+      const bool discovery_off =
+        disable_multicast && !add_localhost_as_static_peer && !add_static_peers;
+      if (discovery_off) {
+        /* This means we have an OFF range, so we should use the domain tag to
+          block all attemtps at automatic discovery. Another participant would
+          need to use this exact same domain tag, down to the PID, to discover
+          the endpoints of this node.
+
+          Setting ParticipantIndex to none eliminates the 119 limit on the number
+          of participants on a machine.
+          */
+        config += "<Discovery><ParticipantIndex>none</ParticipantIndex>";
+        config += "<Tag>ros_discovery_off_" + std::to_string(rcutils_get_pid()) + "</Tag>";
+      } else {
+        config += "<Discovery><ParticipantIndex>auto</ParticipantIndex>";
+        // This controls the number of participants that can be discovered on a single host,
+        // which is roughly equivalent to the number of ROS 2 processes.
+        // If it's too small then we won't connect to all participants.
+        // If it's too large then we will send a lot of announcement traffic.
+        // The default number here is picked arbitrarily.
+        config += "<MaxAutoParticipantIndex>32</MaxAutoParticipantIndex>";
+      }
+
+      if (  // NOLINT
+        (add_static_peers && discovery_options->static_peers_count > 0) ||
+        add_localhost_as_static_peer)
+      {
+        config += "<Peers>";
+
+        if (add_localhost_as_static_peer) {
+          config += "<Peer address=\"localhost\"/>";
+        }
+
+        for (size_t ii = 0; ii < discovery_options->static_peers_count; ++ii) {
+          config += "<Peer address=\"";
+          config += discovery_options->static_peers[ii].peer_address;
+          config += "\"/>";
+        }
+        config += "</Peers>";
+      }
+
+      /* NOTE: Empty configuration fragments are ignored, so it is safe to
+        unconditionally append a comma. */
+      config += "</Discovery></Domain></CycloneDDS>,";
+    }
 
     /* Emulate default behaviour of Cyclone of reading CYCLONEDDS_URI */
     const char * get_env_error;
@@ -1077,6 +1254,8 @@ static bool check_create_domain(dds_domainid_t did, rmw_localhost_only_t localho
       gcdds().domains.erase(did);
       return false;
     }
+
+    RCUTILS_LOG_DEBUG_NAMED("rmw_cyclonedds_cpp", "Config XML is %s", config.c_str());
 
     if ((dom.domain_handle = dds_create_domain(did, config.c_str())) < 0) {
       RCUTILS_LOG_ERROR_NAMED(
@@ -1177,7 +1356,7 @@ rmw_context_impl_s::init(rmw_init_options_t * options, size_t domain_id)
     version of dds_create_domain that doesn't return a handle.  */
   this->domain_id = static_cast<dds_domainid_t>(domain_id);
 
-  if (!check_create_domain(this->domain_id, options->localhost_only)) {
+  if (!check_create_domain(this->domain_id, &options->discovery_options)) {
     return RMW_RET_ERROR;
   }
 
@@ -1435,7 +1614,7 @@ extern "C" rmw_ret_t rmw_init(const rmw_init_options_t * options, rmw_context_t 
 
   if (options->domain_id >= UINT32_MAX && options->domain_id != RMW_DEFAULT_DOMAIN_ID) {
     RCUTILS_LOG_ERROR_NAMED(
-      "rmw_cyclonedds_cpp", "rmw_create_node: domain id out of range");
+      "rmw_cyclonedds_cpp", "rmw_init: domain id out of range");
     return RMW_RET_INVALID_ARGUMENT;
   }
 
@@ -2013,7 +2192,9 @@ static rmw_time_t dds_duration_to_rmw(dds_duration_t duration)
 
 static dds_qos_t * create_readwrite_qos(
   const rmw_qos_profile_t * qos_policies,
-  bool ignore_local_publications)
+  const rosidl_type_hash_t & type_hash,
+  bool ignore_local_publications,
+  const std::string & extra_user_data)
 {
   dds_duration_t ldur;
   dds_qos_t * qos = dds_create_qos();
@@ -2105,6 +2286,17 @@ static dds_qos_t * create_readwrite_qos(
   if (ignore_local_publications) {
     dds_qset_ignorelocal(qos, DDS_IGNORELOCAL_PARTICIPANT);
   }
+
+  std::string typehash_str;
+  if (RMW_RET_OK != rmw_dds_common::encode_type_hash_for_user_data_qos(type_hash, typehash_str)) {
+    RCUTILS_LOG_WARN_NAMED(
+      "rmw_cyclonedds_cpp",
+      "Failed to encode type hash for topic, will not distribute it in USER_DATA.");
+    typehash_str.clear();
+  }
+  std::string user_data = extra_user_data + typehash_str;
+  dds_qset_userdata(qos, user_data.data(), user_data.size());
+
   return qos;
 }
 
@@ -2301,7 +2493,9 @@ static CddsPublisher * create_cdds_publisher(
     set_error_message_from_create_topic(topic, fqtopic_name);
     goto fail_topic;
   }
-  if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
+  qos = create_readwrite_qos(
+    qos_policies, *type_support->get_type_hash_func(type_support), false, "");
+  if (qos == nullptr) {
     goto fail_qos;
   }
   if ((pub->enth = dds_create_writer(dds_pub, topic, qos, listener)) < 0) {
@@ -2833,7 +3027,10 @@ static CddsSubscription * create_cdds_subscription(
     set_error_message_from_create_topic(topic, fqtopic_name);
     goto fail_topic;
   }
-  if ((qos = create_readwrite_qos(qos_policies, ignore_local_publications)) == nullptr) {
+  if ((qos = create_readwrite_qos(
+      qos_policies, *type_support->get_type_hash_func(type_support), ignore_local_publications, ""
+    )) == nullptr)
+  {
     goto fail_qos;
   }
   if ((sub->enth = dds_create_reader(dds_sub, topic, qos, listener)) < 0) {
@@ -3612,6 +3809,60 @@ extern "C" rmw_ret_t rmw_return_loaned_message_from_subscription(
 {
   return return_loaned_message_from_subscription_int(subscription, loaned_message);
 }
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+///////////                                                                   ///////////
+///////////    DYNAMIC MESSAGE TYPESUPPORT                                    ///////////
+///////////                                                                   ///////////
+/////////////////////////////////////////////////////////////////////////////////////////
+
+extern "C" rmw_ret_t rmw_take_dynamic_message(
+  const rmw_subscription_t * subscription,
+  rosidl_dynamic_typesupport_dynamic_data_t * dynamic_message,
+  bool * taken,
+  rmw_subscription_allocation_t * allocation)
+{
+  static_cast<void>(subscription);
+  static_cast<void>(dynamic_message);
+  static_cast<void>(taken);
+  static_cast<void>(allocation);
+
+  RMW_SET_ERROR_MSG("rmw_take_dynamic_message: unimplemented");
+  return RMW_RET_UNSUPPORTED;
+}
+
+extern "C" rmw_ret_t rmw_take_dynamic_message_with_info(
+  const rmw_subscription_t * subscription,
+  rosidl_dynamic_typesupport_dynamic_data_t * dynamic_message,
+  bool * taken,
+  rmw_message_info_t * message_info,
+  rmw_subscription_allocation_t * allocation)
+{
+  static_cast<void>(subscription);
+  static_cast<void>(dynamic_message);
+  static_cast<void>(taken);
+  static_cast<void>(message_info);
+  static_cast<void>(allocation);
+
+  RMW_SET_ERROR_MSG("rmw_take_dynamic_message_with_info: unimplemented");
+  return RMW_RET_UNSUPPORTED;
+}
+
+extern "C" rmw_ret_t rmw_serialization_support_init(
+  const char * serialization_lib_name,
+  rcutils_allocator_t * allocator,
+  rosidl_dynamic_typesupport_serialization_support_t * serialization_support)
+{
+  static_cast<void>(serialization_lib_name);
+  static_cast<void>(allocator);
+  static_cast<void>(serialization_support);
+
+  RMW_SET_ERROR_MSG("rmw_serialization_support_init: unimplemented");
+  return RMW_RET_UNSUPPORTED;
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////////
 ///////////                                                                   ///////////
 ///////////    EVENTS                                                         ///////////
@@ -3627,6 +3878,10 @@ static const std::unordered_map<rmw_event_type_t, uint32_t> mask_map{
   {RMW_EVENT_REQUESTED_QOS_INCOMPATIBLE, DDS_REQUESTED_INCOMPATIBLE_QOS_STATUS},
   {RMW_EVENT_OFFERED_QOS_INCOMPATIBLE, DDS_OFFERED_INCOMPATIBLE_QOS_STATUS},
   {RMW_EVENT_MESSAGE_LOST, DDS_SAMPLE_LOST_STATUS},
+  {RMW_EVENT_PUBLISHER_INCOMPATIBLE_TYPE, DDS_INCONSISTENT_TOPIC_STATUS},
+  {RMW_EVENT_SUBSCRIPTION_INCOMPATIBLE_TYPE, DDS_INCONSISTENT_TOPIC_STATUS},
+  {RMW_EVENT_SUBSCRIPTION_MATCHED, DDS_SUBSCRIPTION_MATCHED_STATUS},
+  {RMW_EVENT_PUBLICATION_MATCHED, DDS_PUBLICATION_MATCHED_STATUS}
 };
 
 static bool is_event_supported(const rmw_event_type_t event_t)
@@ -3752,6 +4007,23 @@ extern "C" rmw_ret_t rmw_take_event(
         return RMW_RET_OK;
       }
 
+    case RMW_EVENT_SUBSCRIPTION_MATCHED: {
+        auto ei = static_cast<rmw_matched_status_t *>(event_info);
+        auto sub = static_cast<CddsSubscription *>(event_handle->data);
+
+        dds_subscription_matched_status_t st;
+        if (dds_get_subscription_matched_status(sub->enth, &st) < 0) {
+          *taken = false;
+          return RMW_RET_ERROR;
+        }
+        ei->total_count = static_cast<size_t>(st.total_count);
+        ei->total_count_change = static_cast<size_t>(st.total_count_change);
+        ei->current_count = static_cast<size_t>(st.current_count);
+        ei->current_count_change = st.current_count_change;
+        *taken = true;
+        return RMW_RET_OK;
+      }
+
     case RMW_EVENT_LIVELINESS_LOST: {
         auto ei = static_cast<rmw_liveliness_lost_status_t *>(event_info);
         auto pub = static_cast<CddsPublisher *>(event_handle->data);
@@ -3797,6 +4069,57 @@ extern "C" rmw_ret_t rmw_take_event(
           *taken = true;
           return RMW_RET_OK;
         }
+      }
+
+    case RMW_EVENT_PUBLISHER_INCOMPATIBLE_TYPE: {
+        auto it = static_cast<rmw_incompatible_type_status_t *>(event_info);
+        auto pub = static_cast<CddsPublisher *>(event_handle->data);
+
+        const dds_entity_t topic = dds_get_topic(pub->enth);
+        dds_inconsistent_topic_status_t st;
+        if (dds_get_inconsistent_topic_status(topic, &st) < 0) {
+          *taken = false;
+          return RMW_RET_ERROR;
+        } else {
+          it->total_count = static_cast<int32_t>(st.total_count);
+          it->total_count_change = st.total_count_change;
+          *taken = true;
+          return RMW_RET_OK;
+        }
+      }
+
+    case RMW_EVENT_SUBSCRIPTION_INCOMPATIBLE_TYPE: {
+        auto it = static_cast<rmw_incompatible_type_status_t *>(event_info);
+        auto sub = static_cast<CddsSubscription *>(event_handle->data);
+
+        const dds_entity_t topic = dds_get_topic(sub->enth);
+        dds_inconsistent_topic_status_t st;
+        if (dds_get_inconsistent_topic_status(topic, &st) < 0) {
+          *taken = false;
+          return RMW_RET_ERROR;
+        } else {
+          it->total_count = static_cast<int32_t>(st.total_count);
+          it->total_count_change = st.total_count_change;
+          *taken = true;
+          return RMW_RET_OK;
+        }
+      }
+
+    case RMW_EVENT_PUBLICATION_MATCHED: {
+        auto ei = static_cast<rmw_matched_status_t *>(event_info);
+        auto pub = static_cast<CddsPublisher *>(event_handle->data);
+
+        dds_publication_matched_status st;
+        if (dds_get_publication_matched_status(pub->enth, &st) < 0) {
+          *taken = false;
+          return RMW_RET_ERROR;
+        }
+        ei->total_count = static_cast<size_t>(st.total_count);
+        ei->total_count_change = static_cast<size_t>(st.total_count_change);
+        ei->current_count = static_cast<size_t>(st.current_count);
+        ei->current_count_change = st.current_count_change;
+        *taken = true;
+        return RMW_RET_OK;
       }
 
     case RMW_EVENT_INVALID: {
@@ -4039,12 +4362,22 @@ static rmw_ret_t gather_event_entities(
       if (status_mask_map.find(dds_entity) == status_mask_map.end()) {
         status_mask_map[dds_entity] = 0;
       }
-      status_mask_map[dds_entity] |= get_status_kind_from_rmw(current_event->event_type);
+
+      uint32_t status_kind = get_status_kind_from_rmw(current_event->event_type);
+      // TODO(clalancette): This should be reenabled when Cyclone supports reporting inconsistent
+      // topic as an event
+      if (status_kind != DDS_INCONSISTENT_TOPIC_STATUS) {
+        status_mask_map[dds_entity] |= get_status_kind_from_rmw(current_event->event_type);
+      }
     }
   }
   for (auto & pair : status_mask_map) {
     // set the status condition's mask with the supported type
-    dds_set_status_mask(pair.first, pair.second);
+    dds_return_t ret = dds_set_status_mask(pair.first, pair.second);
+    if (ret != DDS_RETCODE_OK) {
+      RMW_SET_ERROR_MSG("Failed setting the status mask");
+      return RMW_RET_ERROR;
+    }
     entities.insert(pair.first);
   }
 
@@ -4616,6 +4949,10 @@ static rmw_ret_t rmw_init_cs(
   auto sub = std::make_unique<CddsSubscription>();
   std::string subtopic_name, pubtopic_name;
   void * pub_type_support, * sub_type_support;
+  dds_qos_t * pub_qos, * sub_qos;
+  const rosidl_type_hash_t * pub_type_hash;
+  const rosidl_type_hash_t * sub_type_hash;
+  std::string user_data;
 
   std::unique_ptr<rmw_cyclonedds_cpp::StructValueType> pub_msg_ts, sub_msg_ts;
 
@@ -4628,8 +4965,12 @@ static rmw_ret_t rmw_init_cs(
 
     sub_type_support = create_request_type_support(
       type_support->data, type_support->typesupport_identifier);
+    sub_type_hash = type_supports->request_typesupport->get_type_hash_func(
+      type_supports->request_typesupport);
     pub_type_support = create_response_type_support(
       type_support->data, type_support->typesupport_identifier);
+    pub_type_hash = type_supports->response_typesupport->get_type_hash_func(
+      type_supports->response_typesupport);
     subtopic_name =
       make_fqtopic(ROS_SERVICE_REQUESTER_PREFIX, service_name, "Request", qos_policies);
     pubtopic_name = make_fqtopic(ROS_SERVICE_RESPONSE_PREFIX, service_name, "Reply", qos_policies);
@@ -4639,8 +4980,12 @@ static rmw_ret_t rmw_init_cs(
 
     pub_type_support = create_request_type_support(
       type_support->data, type_support->typesupport_identifier);
+    pub_type_hash = type_supports->request_typesupport->get_type_hash_func(
+      type_supports->request_typesupport);
     sub_type_support = create_response_type_support(
       type_support->data, type_support->typesupport_identifier);
+    sub_type_hash = type_supports->response_typesupport->get_type_hash_func(
+      type_supports->response_typesupport);
     pubtopic_name =
       make_fqtopic(ROS_SERVICE_REQUESTER_PREFIX, service_name, "Request", qos_policies);
     subtopic_name = make_fqtopic(ROS_SERVICE_RESPONSE_PREFIX, service_name, "Reply", qos_policies);
@@ -4674,28 +5019,32 @@ static rmw_ret_t rmw_init_cs(
     set_error_message_from_create_topic(subtopic, subtopic_name);
     goto fail_subtopic;
   }
-  // before proceeding to outright ignore given QoS policies, sanity check them
-  dds_qos_t * qos;
-  if ((qos = create_readwrite_qos(qos_policies, false)) == nullptr) {
-    goto fail_qos;
-  }
 
   // store a unique identifier for this client/service in the user
   // data of the reader and writer so that we can always determine
   // which pairs belong together
   get_unique_csid(node, cs->id);
-  {
-    std::string user_data = std::string(is_service ? "serviceid=" : "clientid=") + csid_to_string(
-      cs->id) + std::string(";");
-    dds_qset_userdata(qos, user_data.c_str(), user_data.size());
+  user_data = std::string(is_service ? "serviceid=" : "clientid=") + csid_to_string(
+    cs->id) + std::string(";");
+
+  if ((pub_qos = create_readwrite_qos(qos_policies, *pub_type_hash, false, user_data)) == nullptr) {
+    goto fail_pub_qos;
   }
-  if ((pub->enth = dds_create_writer(node->context->impl->dds_pub, pubtopic, qos, nullptr)) < 0) {
+  if ((sub_qos = create_readwrite_qos(qos_policies, *sub_type_hash, false, user_data)) == nullptr) {
+    goto fail_sub_qos;
+  }
+
+  if ((pub->enth =
+    dds_create_writer(node->context->impl->dds_pub, pubtopic, pub_qos, nullptr)) < 0)
+  {
     RMW_SET_ERROR_MSG("failed to create writer");
     goto fail_writer;
   }
   get_entity_gid(pub->enth, pub->gid);
   pub->sertype = pub_stact;
-  if ((sub->enth = dds_create_reader(node->context->impl->dds_sub, subtopic, qos, listener)) < 0) {
+  if ((sub->enth =
+    dds_create_reader(node->context->impl->dds_sub, subtopic, sub_qos, listener)) < 0)
+  {
     RMW_SET_ERROR_MSG("failed to create reader");
     goto fail_reader;
   }
@@ -4709,7 +5058,8 @@ static rmw_ret_t rmw_init_cs(
     goto fail_instance_handle;
   }
   dds_delete_listener(listener);
-  dds_delete_qos(qos);
+  dds_delete_qos(pub_qos);
+  dds_delete_qos(sub_qos);
   dds_delete(subtopic);
   dds_delete(pubtopic);
 
@@ -4724,8 +5074,10 @@ fail_readcond:
 fail_reader:
   dds_delete(pub->enth);
 fail_writer:
-  dds_delete_qos(qos);
-fail_qos:
+  dds_delete_qos(sub_qos);
+fail_sub_qos:
+  dds_delete_qos(pub_qos);
+fail_pub_qos:
   dds_delete(subtopic);
 fail_subtopic:
   dds_delete(pubtopic);
